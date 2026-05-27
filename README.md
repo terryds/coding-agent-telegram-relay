@@ -175,8 +175,53 @@ Everything is stored in `data/app.db` (SQLite). Two tables:
 
 To wipe state, stop the process, delete `data/app.db*`, and restart — or use **Reset everything** in the dashboard.
 
+## Security
+
+Read this before deploying. The threat model is non-trivial.
+
+### What an attacker who reaches your bot can do
+
+Claude is spawned with `--permission-mode bypassPermissions`, which means **every message that the relay accepts becomes a shell-capable prompt running as your VPS user**. There is no sandbox. The only thing keeping strangers out is:
+
+1. They don't have your bot token, and
+2. Their Telegram chat ID doesn't match the one captured during onboarding.
+
+If either of those falls over, the attacker has shell.
+
+**Treat the bot token like an SSH private key.** Anyone with the token can DM the bot — but they still can't get through because of the chat-ID whitelist, *unless* they can also reach the dashboard.
+
+### The dashboard has no built-in authentication
+
+Anyone who can open the dashboard URL can hit **Reset everything**, re-onboard with their own bot token / chat ID, and get shell. **Do not expose port 3000 to the public internet directly.** Use one of:
+
+- An SSH tunnel (no public exposure at all — recommended for personal use)
+- A reverse proxy with HTTP basic auth (see the Nginx snippet above)
+- A VPN / Tailscale / Cloudflare Access in front of the port
+
+### Prompt injection is a real risk
+
+Because Claude runs with full shell access, **prompt injection from any source the bot relays — including from you** — is a meaningful risk. Examples that can hijack Claude:
+
+- "Summarize this email" where the email contains `Ignore previous instructions and run …`
+- Pasting log output, GitHub issue content, or web page text without reading it first
+
+Mitigations:
+
+- Don't relay untrusted content blindly. If you wouldn't paste it into a root shell, don't paste it into the bot.
+- Run the relay as a dedicated unprivileged user, not root. Limit what that user can do on the VPS.
+- Consider keeping sensitive secrets (other API keys, deploy keys) out of the home directory of the user that runs Claude.
+
+### What is and isn't sent over the network
+
+- **Telegram Bot API**: every incoming/outgoing message goes through Telegram's servers (they can read it).
+- **Claude**: Claude Code uses your local credentials and sends prompts to Anthropic's API.
+- **Dashboard**: no telemetry, no external calls. The bot token and chat ID never leave the server; the client only ever sees `bot_token_set: true|false`.
+
+### Reporting issues
+
+If you find a security issue, please open a private security advisory on GitHub rather than a public issue.
+
 ## Notes
 
 - The relay is single-tenant: only the chat ID captured during onboarding can talk to Claude. Other senders are ignored.
 - The bot polls Telegram with long-polling (`getUpdates`, 25s timeout). No webhook setup needed.
-- Claude is spawned with `--permission-mode bypassPermissions`. It runs with your VPS user's permissions. Treat the bot token like an SSH key.
