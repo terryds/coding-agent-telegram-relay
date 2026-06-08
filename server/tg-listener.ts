@@ -13,6 +13,7 @@ import {
   type TelegramUpdate,
 } from './telegram.ts';
 import { runClaudeHeadless } from './claude-runner.ts';
+import { watchSession, type ClaudeStep } from './claude-stream.ts';
 
 const INCOMING_DIR = resolve('./data/incoming');
 mkdirSync(INCOMING_DIR, { recursive: true });
@@ -81,6 +82,68 @@ async function withTyping<T>(fn: () => Promise<T>): Promise<T> {
     return await fn();
   } finally {
     clearInterval(interval);
+  }
+}
+
+// ── Live step streaming ─────────────────────────────────────────────
+
+const MAX_TG = 4000;
+
+function formatStep(step: ClaudeStep): string {
+  switch (step.kind) {
+    case 'thinking':
+      return `🧠 <i>thinking…</i>`;
+    case 'tool_use': {
+      const name = escapeHtml(step.toolName ?? '?');
+      const input = escapeHtml(step.toolInput ?? '');
+      return `🛠 <b>${name}</b>\n<pre>${input.slice(0, MAX_TG - 200)}</pre>`;
+    }
+    case 'tool_result': {
+      const txt = escapeHtml(step.resultText ?? '');
+      return `✅ <pre>${txt.slice(0, MAX_TG - 100)}</pre>`;
+    }
+    case 'text': {
+      // The final text response will be sent separately by the caller,
+      // so skip it here to avoid duplication.
+      return '';
+    }
+    default:
+      return '';
+  }
+}
+
+/** Rate-limiter: avoid hitting Telegram's flood limits (~30 msg/s). */
+let lastStepSentAt = 0;
+const MIN_STEP_INTERVAL_MS = 500;
+
+async function sendStep(step: ClaudeStep): Promise<void> {
+  const msg = formatStep(step);
+  if (!msg) return;
+  // Throttle
+  const now = Date.now();
+  const wait = MIN_STEP_INTERVAL_MS - (now - lastStepSentAt);
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  lastStepSentAt = Date.now();
+  const r = await sendTelegram(msg);
+  if (!r.ok) console.error(`[tg-listener] step send failed: ${r.error}`);
+}
+
+/**
+ * Run Claude with live step-by-step output to Telegram.
+ * Watches the JSONL session file while claude-runner executes.
+ */
+async function runClaudeWithStream(
+  prompt: string,
+  sessionId: string | null,
+): ReturnType<typeof runClaudeHeadless> {
+  const sid = sessionId ?? 'unknown';
+  const stopWatch = await watchSession(sid, sendStep);
+  try {
+    return await runClaudeHeadless(prompt, sessionId);
+  } finally {
+    // Small delay to catch final writes before closing
+    await new Promise(r => setTimeout(r, 1000));
+    stopWatch();
   }
 }
 
@@ -192,7 +255,7 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
   console.log(
     `[tg-listener] → claude (${sessionId ? 'resume ' + sessionId.slice(0, 8) : 'new session'}): ${prompt.slice(0, 80)}`
   );
-  const result = await withTyping(() => runClaudeHeadless(prompt, sessionId));
+  const result = await withTyping(() => runClaudeWithStream(prompt, sessionId));
 
   if (result.ok) {
     if (result.session_id) setSetting(CLAUDE_SESSION_KEY, result.session_id);

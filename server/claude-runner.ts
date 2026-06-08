@@ -2,6 +2,10 @@ export type ClaudeResult =
   | { ok: true; text: string; session_id: string | null }
   | { ok: false; error: string };
 
+// 10 minutes — long enough for complex tool-calling tasks,
+// short enough to unblock the listener if the process hangs.
+const CLAUDE_TIMEOUT_MS = 10 * 60 * 1000;
+
 export async function runClaudeHeadless(
   prompt: string,
   sessionId: string | null
@@ -29,19 +33,59 @@ export async function runClaudeHeadless(
     };
   }
 
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  // Guard against Claude finishing work but the process never exiting.
+  // When the timeout fires we kill the process, which closes its streams
+  // and lets the Promise.all below resolve with whatever was already written.
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    console.log(`[claude-runner] killing claude (PID ${proc.pid}) after ${CLAUDE_TIMEOUT_MS / 1000}s timeout`);
+    try { proc.kill(); } catch {}
+    // If SIGTERM doesn't work, force-kill after 3s
+    setTimeout(() => {
+      try { proc.kill(9); } catch {}
+    }, 3_000);
+  }, CLAUDE_TIMEOUT_MS);
 
-  if (exitCode !== 0) {
+  let stdout: string;
+  let stderr: string;
+  try {
+    [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+  } catch (err) {
+    clearTimeout(timer);
     return {
       ok: false,
-      error: `claude exited with code ${exitCode}: ${stderr.trim() || stdout.trim() || 'no output'}`,
+      error: `claude process error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (timedOut) {
+    // Process was killed, but stdout may still contain a valid JSON result
+    // (Claude writes it before the process hangs)
+    const parsed = tryParseOutput(stdout);
+    if (parsed.ok) {
+      console.log('[claude-runner] recovered output from timed-out process');
+      return parsed;
+    }
+    return {
+      ok: false,
+      error: `Claude timed out after ${CLAUDE_TIMEOUT_MS / 60_000} minutes. Partial output: ${stdout.slice(0, 300)}`,
     };
   }
 
+  return tryParseOutput(stdout, stderr);
+}
+
+function tryParseOutput(
+  stdout: string,
+  stderr?: string,
+): ClaudeResult {
   try {
     const parsed = JSON.parse(stdout) as {
       result?: string;
@@ -59,7 +103,7 @@ export async function runClaudeHeadless(
   } catch (err) {
     return {
       ok: false,
-      error: `Failed to parse claude JSON output: ${err instanceof Error ? err.message : String(err)}. Raw: ${stdout.slice(0, 300)}`,
+      error: `Failed to parse claude JSON output: ${err instanceof Error ? err.message : String(err)}. Raw: ${stdout.slice(0, 300)}${stderr ? ` Stderr: ${stderr.slice(0, 200)}` : ''}`,
     };
   }
 }
