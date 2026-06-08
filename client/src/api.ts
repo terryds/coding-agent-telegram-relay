@@ -40,6 +40,28 @@ export type MessageLogEntry = {
   error: string | null;
 };
 
+export type FeedEvent =
+  | {
+      etype: 'message';
+      id: number;
+      created_at: number;
+      direction: 'in' | 'out';
+      text: string;
+      session_id: string | null;
+      ok: boolean;
+      error: string | null;
+    }
+  | {
+      etype: 'step';
+      id: number;
+      created_at: number;
+      session_id: string | null;
+      kind: 'thinking' | 'tool_use' | 'tool_result';
+      tool_name: string | null;
+      tool_input: string | null;
+      result_text: string | null;
+    };
+
 export const api = {
   status: () => request<Status>('/status'),
   claudeCheck: () => request<ClaudeCheck>('/claude-check'),
@@ -61,5 +83,7 @@ export const api = {
   resetSession: () => request<{ ok: true }>('/reset-session', { method: 'POST' }),
   messages: (limit = 50) =>
     request<{ messages: MessageLogEntry[] }>(`/messages?limit=${limit}`),
+  feed: (limit = 300) =>
+    request<{ events: FeedEvent[] }>(`/feed?limit=${limit}`),
   reset: () => request<{ ok: true }>('/reset', { method: 'POST' }),
 };

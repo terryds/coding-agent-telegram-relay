@@ -1,6 +1,6 @@
 import { resolve, extname } from 'node:path';
 import { existsSync, statSync, readFileSync } from 'node:fs';
-import { getSetting, setSetting, deleteSetting, recentMessages } from './db.ts';
+import { getSetting, setSetting, deleteSetting, recentMessages, recentFeed } from './db.ts';
 import { getBotInfo, getRecentChats, getTelegramConfig } from './telegram.ts';
 import { checkClaudeInstalled } from './claude-runner.ts';
 import {
@@ -127,6 +127,11 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   if (p === '/messages' && m === 'GET') {
     const limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
     return json({ messages: recentMessages(limit) });
+  }
+
+  if (p === '/feed' && m === 'GET') {
+    const limit = Math.min(Number(url.searchParams.get('limit') || 300), 1000);
+    return json({ events: recentFeed(limit) });
   }
 
   if (p === '/chats' && m === 'GET') {

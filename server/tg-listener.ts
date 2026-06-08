@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { getSetting, setSetting, db, logMessage } from './db.ts';
+import { getSetting, setSetting, db, logMessage, logStep } from './db.ts';
 import {
   getTelegramConfig,
   getUpdatesRaw,
@@ -155,7 +155,14 @@ function startClaudeRun(prompt: string, sessionId: string | null): void {
 
   void (async () => {
     const sid = sessionId ?? 'unknown';
-    const stopWatch = await watchSession(sid, sendStep);
+    // Persist every step for the dashboard feed, then forward it to Telegram.
+    // Persisting first (and synchronously) keeps DB order correct even though
+    // sendStep is throttled.
+    const onStep = async (step: ClaudeStep) => {
+      logStep(step, sessionId);
+      await sendStep(step);
+    };
+    const stopWatch = await watchSession(sid, onStep);
     let watcherStopped = false;
     run.stop = () => {
       if (watcherStopped) return;

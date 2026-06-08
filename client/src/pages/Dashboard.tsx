@@ -1,29 +1,39 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useLocation } from 'wouter';
-import { api, type MessageLogEntry, type Status } from '../api';
+import { api, type FeedEvent, type Status } from '../api';
 
 type Props = { status: Status; onChange: () => void };
 
 export function Dashboard({ status, onChange }: Props) {
   const [, setLocation] = useLocation();
-  const [messages, setMessages] = useState<MessageLogEntry[]>([]);
+  const [events, setEvents] = useState<FeedEvent[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const feedRef = useRef<HTMLDivElement>(null);
 
-  const loadMessages = async () => {
+  const loadFeed = async () => {
     try {
-      const r = await api.messages(50);
-      setMessages(r.messages);
+      const r = await api.feed(300);
+      setEvents(r.events);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
   useEffect(() => {
-    loadMessages();
-    const id = window.setInterval(loadMessages, 3000);
+    loadFeed();
+    const id = window.setInterval(loadFeed, 3000);
     return () => window.clearInterval(id);
   }, []);
+
+  // Stick to the bottom (newest) as new events stream in, but only if the user
+  // is already near the bottom — don't yank them away while scrolled up.
+  useEffect(() => {
+    const el = feedRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (nearBottom) el.scrollTop = el.scrollHeight;
+  }, [events]);
 
   const toggleRelay = async () => {
     setBusy('relay');
@@ -163,50 +173,112 @@ export function Dashboard({ status, onChange }: Props) {
 
       <section>
         <h2 className="font-medium mb-3 text-sm uppercase tracking-wide text-zinc-400">
-          Recent messages
+          Activity
         </h2>
-        {messages.length === 0 ? (
-          <p className="text-zinc-500 text-sm">No messages yet.</p>
+        {events.length === 0 ? (
+          <p className="text-zinc-500 text-sm">No activity yet.</p>
         ) : (
-          <ul className="space-y-2">
-            {messages.map((m) => (
-              <li
-                key={m.id}
-                className={[
-                  'rounded border px-3 py-2 text-sm',
-                  m.direction === 'in'
-                    ? 'border-zinc-800 bg-zinc-900/40'
-                    : m.ok
-                      ? 'border-blue-900/40 bg-blue-950/20'
-                      : 'border-red-900/40 bg-red-950/20',
-                ].join(' ')}
-              >
-                <div className="flex items-center justify-between gap-3 mb-1">
-                  <span className="text-xs uppercase tracking-wide text-zinc-500">
-                    {m.direction === 'in' ? '→ Telegram' : '← Claude'}
-                  </span>
-                  <span className="text-xs text-zinc-500">
-                    {new Date(m.created_at).toLocaleString()}
-                  </span>
-                </div>
-                <div className="whitespace-pre-wrap break-words font-mono text-xs text-zinc-200">
-                  {m.error ? (
-                    <span className="text-red-300">{m.error}</span>
-                  ) : (
-                    truncate(m.text, 600)
-                  )}
-                </div>
-                {m.session_id && (
-                  <div className="text-[10px] text-zinc-500 mt-1 font-mono">
-                    session {m.session_id.slice(0, 8)}
-                  </div>
-                )}
-              </li>
+          <div
+            ref={feedRef}
+            className="max-h-[65vh] overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950/40 p-3 space-y-2"
+          >
+            {events.map((e) => (
+              <FeedItem key={`${e.etype}-${e.id}`} event={e} />
             ))}
-          </ul>
+          </div>
         )}
       </section>
     </div>
+  );
+}
+
+function FeedItem({ event }: { event: FeedEvent }) {
+  const ts = new Date(event.created_at).toLocaleTimeString();
+
+  if (event.etype === 'step') {
+    if (event.kind === 'thinking') {
+      return (
+        <Row label="🧠 thinking" ts={ts} tone="muted">
+          <span className="italic text-zinc-400">…</span>
+        </Row>
+      );
+    }
+    if (event.kind === 'tool_use') {
+      return (
+        <Row label={`🛠 ${event.tool_name ?? '?'}`} ts={ts} tone="tool">
+          {event.tool_input && <Pre>{event.tool_input}</Pre>}
+        </Row>
+      );
+    }
+    // tool_result
+    return (
+      <Row label="✅ result" ts={ts} tone="result">
+        {event.result_text && <Pre>{event.result_text}</Pre>}
+      </Row>
+    );
+  }
+
+  // message
+  const isIn = event.direction === 'in';
+  return (
+    <Row
+      label={isIn ? '→ Telegram' : '← Claude'}
+      ts={ts}
+      tone={isIn ? 'in' : event.ok ? 'out' : 'error'}
+      session={event.session_id}
+    >
+      <div className="whitespace-pre-wrap break-words text-zinc-100">
+        {event.error ? (
+          <span className="text-red-300">{event.error}</span>
+        ) : (
+          truncate(event.text, 600)
+        )}
+      </div>
+    </Row>
+  );
+}
+
+const TONES: Record<string, string> = {
+  in: 'border-zinc-800 bg-zinc-900/40',
+  out: 'border-blue-900/40 bg-blue-950/20',
+  error: 'border-red-900/40 bg-red-950/20',
+  muted: 'border-zinc-800/60 bg-zinc-900/20',
+  tool: 'border-amber-900/40 bg-amber-950/10',
+  result: 'border-emerald-900/40 bg-emerald-950/10',
+};
+
+function Row({
+  label,
+  ts,
+  tone,
+  session,
+  children,
+}: {
+  label: string;
+  ts: string;
+  tone: keyof typeof TONES | string;
+  session?: string | null;
+  children?: ReactNode;
+}) {
+  return (
+    <div className={['rounded border px-3 py-2 text-sm', TONES[tone] ?? TONES.in].join(' ')}>
+      <div className="flex items-center justify-between gap-3 mb-1">
+        <span className="text-xs uppercase tracking-wide text-zinc-500">{label}</span>
+        <span className="text-xs text-zinc-600">{ts}</span>
+      </div>
+      <div className="font-mono text-xs text-zinc-200">{children}</div>
+      {session && (
+        <div className="text-[10px] text-zinc-600 mt-1 font-mono">
+          session {session.slice(0, 8)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Pre({ children }: { children: string }) {
+  return (
+    <pre className="whitespace-pre-wrap break-words text-zinc-300 mt-0.5">{children}</pre>
   );
 }
 
