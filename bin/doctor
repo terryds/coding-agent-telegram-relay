@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# doctor — report install status of every dependency. Read-only; installs
+# nothing. Exits non-zero if a core dependency is missing or no agent CLI is
+# present, so it's safe to use as a preflight check.
+set -uo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_deps.sh
+. "$DIR/_deps.sh"
+
+missing=0
+echo "Core dependencies:"
+for d in "${CORE_DEPS[@]}"; do
+  if have "$d"; then
+    printf '  %s✓%s %-8s %s%s%s\n' "$C_OK" "$C_RST" "$d" "$C_DIM" "$(version_of "$d")" "$C_RST"
+  else
+    printf '  %s✗%s %-8s %smissing%s\n' "$C_BAD" "$C_RST" "$d" "$C_BAD" "$C_RST"
+    missing=$((missing + 1))
+  fi
+done
+
+echo
+echo "Coding agent CLIs (need at least one):"
+agents=0
+for d in "${AGENT_CLIS[@]}"; do
+  if have "$d"; then
+    printf '  %s✓%s %-8s %s%s%s\n' "$C_OK" "$C_RST" "$d" "$C_DIM" "$(version_of "$d")" "$C_RST"
+    agents=$((agents + 1))
+  else
+    printf '  %s•%s %-8s %snot found — %s%s\n' "$C_WARN" "$C_RST" "$d" "$C_DIM" "$(agent_hint "$d")" "$C_RST"
+  fi
+done
+
+echo
+if [ "$missing" -gt 0 ]; then
+  echo "${C_BAD}${missing} core dependency(ies) missing.${C_RST} Run: ${DIR}/install"
+fi
+if [ "$agents" -eq 0 ]; then
+  echo "${C_WARN}No coding agent CLI found.${C_RST} Install Claude Code or Codex (see hints above)."
+fi
+if [ "$missing" -eq 0 ] && [ "$agents" -gt 0 ]; then
+  echo "${C_OK}All set.${C_RST}"
+fi
+
+# Non-zero if anything critical is missing.
+[ "$missing" -eq 0 ] && [ "$agents" -gt 0 ]

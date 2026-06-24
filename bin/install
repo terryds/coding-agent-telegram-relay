@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# install — install missing dependencies on Ubuntu/Debian (apt). Idempotent:
+# only installs what's absent, safe to re-run. Does NOT install the agent CLIs
+# (claude/codex) or run their login — it prints pointers for those instead.
+#
+# Uses sudo for system packages when not run as root.
+set -uo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_deps.sh
+. "$DIR/_deps.sh"
+
+if ! have apt-get; then
+  echo "${C_BAD}This installer targets Ubuntu/Debian (apt-get not found).${C_RST}"
+  echo "Install these manually, then re-run ${DIR}/doctor:"
+  echo "  ${CORE_DEPS[*]}"
+  exit 1
+fi
+
+SUDO=""
+[ "$(id -u)" -ne 0 ] && SUDO="sudo"
+
+apt_updated=0
+apt_install() {
+  if [ "$apt_updated" -eq 0 ]; then
+    $SUDO apt-get update -y && apt_updated=1
+  fi
+  $SUDO apt-get install -y "$@"
+}
+
+install_bun() {
+  curl -fsSL https://bun.sh/install | bash
+  # Make bun visible for the rest of this run.
+  export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+  export PATH="$BUN_INSTALL/bin:$PATH"
+}
+
+install_node() {
+  # NodeSource LTS (matches the README). Brings npm along.
+  curl -fsSL https://deb.nodesource.com/setup_20.x | $SUDO -E bash -
+  $SUDO apt-get install -y nodejs
+}
+
+install_pm2() { $SUDO npm install -g pm2; }
+
+ensure() {
+  local tool="$1"
+  if have "$tool"; then
+    printf '  %s✓%s %-8s already present (%s%s%s)\n' "$C_OK" "$C_RST" "$tool" "$C_DIM" "$(version_of "$tool")" "$C_RST"
+    return 0
+  fi
+  printf '  %s…%s installing %s\n' "$C_WARN" "$C_RST" "$tool"
+  case "$tool" in
+    git|curl|jq|sqlite3) apt_install "$tool" ;;
+    bun)                 install_bun ;;
+    node|npm)            install_node ;;
+    pm2)                 install_pm2 ;;
+    *)                   echo "  ${C_BAD}no installer for $tool${C_RST}"; return 1 ;;
+  esac
+  if have "$tool"; then
+    printf '  %s✓%s %-8s installed (%s%s%s)\n' "$C_OK" "$C_RST" "$tool" "$C_DIM" "$(version_of "$tool")" "$C_RST"
+  else
+    printf '  %s✗%s %-8s install failed\n' "$C_BAD" "$C_RST" "$tool"
+    return 1
+  fi
+}
+
+echo "Installing core dependencies (Ubuntu/Debian)…"
+rc=0
+for d in "${CORE_DEPS[@]}"; do
+  ensure "$d" || rc=1
+done
+
+echo
+echo "Coding agent CLIs (install + log in manually — at least one):"
+for d in "${AGENT_CLIS[@]}"; do
+  if have "$d"; then
+    printf '  %s✓%s %-8s (%s%s%s)\n' "$C_OK" "$C_RST" "$d" "$C_DIM" "$(version_of "$d")" "$C_RST"
+  else
+    printf '  %s•%s %-8s %s\n' "$C_WARN" "$C_RST" "$d" "$(agent_hint "$d")"
+  fi
+done
+
+echo
+if [ "$rc" -eq 0 ]; then
+  echo "${C_OK}Core dependencies ready.${C_RST}"
+  echo "If bun was just installed, open a new shell (or: source ~/.bashrc) so it's on PATH."
+  echo "Next: cd into the repo, then  bun install && bun run build  — see README for pm2 setup."
+else
+  echo "${C_BAD}Some installs failed — see above.${C_RST}"
+fi
+exit "$rc"

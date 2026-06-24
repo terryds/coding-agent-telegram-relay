@@ -49,7 +49,19 @@ The single Bun process serves both `/api/*` and the static React build on one po
 
 These steps assume Ubuntu/Debian. Adjust paths as needed.
 
-### 1. Install Bun, Node (for pm2), and Claude Code
+### 1. Install dependencies
+
+The repo ships an installer for the system dependencies (bun, Node, pm2, git, jq, sqlite3). After cloning, just run:
+
+```bash
+bin/install        # installs anything missing (Ubuntu/Debian, uses sudo)
+bin/doctor         # read-only: report what's present / missing
+```
+
+`bin/install` is idempotent (safe to re-run) and **does not** touch the agent CLIs — install + log into Claude Code or Codex yourself (it prints the links). This is also the "point your coding agent at the repo" path: an agent can run `bin/doctor`, then `bin/install`, then follow the agent-CLI hints.
+
+<details>
+<summary>Or install everything by hand</summary>
 
 ```bash
 # Bun
@@ -63,17 +75,17 @@ sudo apt install -y nodejs
 # pm2 globally
 sudo npm install -g pm2
 
-# Claude Code
-npm install -g @anthropic-ai/claude-code
-claude --version   # confirm it's on PATH
+# deploy-script helpers
+sudo apt install -y git jq sqlite3
+
+# An agent CLI (pick one or both):
+npm install -g @anthropic-ai/claude-code   # Claude Code
+# Codex: see https://developers.openai.com/codex/cli
 ```
 
-Log into Claude Code interactively at least once so the credentials are stored for your user:
+</details>
 
-```bash
-claude
-# follow the auth flow, then /exit
-```
+Then log into your agent so credentials are stored for your user — `claude` (follow the auth flow, then `/exit`) and/or `codex login`.
 
 ### 2. Clone and build
 
@@ -208,7 +220,7 @@ The repo ships a deploy helper at [`bin/safe-update-relay`](bin/safe-update-rela
 setsid nohup ~/coding-agent-telegram-relay/bin/safe-update-relay >/dev/null 2>&1 < /dev/null &
 ```
 
-`setsid + nohup + &` keep it alive after `pm2 restart` kills its caller. See [`CLAUDE.md`](CLAUDE.md) for config (`RELAY_PROCESS_NAME`, `RELAY_REPO_DIR`) and one-time migration notes.
+`setsid + nohup + &` keep it alive after `pm2 restart` kills its caller. See [`AGENTS.md`](AGENTS.md) for config (`RELAY_PROCESS_NAME`, `RELAY_REPO_DIR`) and one-time migration notes.
 
 ## Bot commands
 
