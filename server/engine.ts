@@ -50,7 +50,7 @@ export type AskQuestion = {
 
 export type EngineResult =
   | { ok: true; text: string; session_id: string | null; questions?: AskQuestion[] }
-  | { ok: false; error: string; aborted?: boolean };
+  | { ok: false; error: string; aborted?: boolean; staleSession?: boolean };
 
 export type EngineCheck = {
   installed: boolean;

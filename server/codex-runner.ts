@@ -243,7 +243,12 @@ export async function runCodexHeadless(
   if (aborted) return { ok: false, error: 'Stopped by user.', aborted: true };
 
   if (acc.errored && !acc.finalText) {
-    return { ok: false, error: acc.errored };
+    // If a resume failed because the thread/session can't be found, flag it so
+    // the caller drops the stale id and restarts fresh.
+    const stale =
+      sessionId != null &&
+      /not found|no (such )?(session|thread|conversation|rollout)/i.test(acc.errored);
+    return { ok: false, error: acc.errored, staleSession: stale || undefined };
   }
 
   if (timedOut && !acc.finalText) {

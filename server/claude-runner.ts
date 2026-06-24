@@ -162,6 +162,17 @@ function tryParseOutput(
   stdout: string,
   stderr?: string,
 ): ClaudeResult {
+  // A resumed session whose JSONL no longer exists (e.g. the working dir was
+  // renamed, or ~/.claude was cleaned) makes claude exit with this on stderr
+  // and nothing on stdout. Flag it so the caller can drop the stale id and
+  // restart fresh instead of surfacing a scary parse error.
+  if (/No conversation found with session ID/i.test(`${stdout}\n${stderr ?? ''}`)) {
+    return {
+      ok: false,
+      error: 'Saved session no longer exists.',
+      staleSession: true,
+    };
+  }
   try {
     const parsed = JSON.parse(stdout) as {
       result?: string;

@@ -184,6 +184,21 @@ function startEngineRun(prompt: string, sessionId: string | null): void {
     let result: EngineResult;
     try {
       result = await engine.run(prompt, sessionId, abort.signal, onStep);
+
+      // The saved session id no longer resolves (e.g. the working dir was
+      // renamed, or ~/.claude was cleaned). Drop it and transparently restart
+      // as a fresh conversation rather than erroring at the user.
+      if (!result.ok && result.staleSession && sessionId && !abort.signal.aborted) {
+        db.prepare('DELETE FROM settings WHERE key = ?').run(CLAUDE_SESSION_KEY);
+        await sendTelegram(
+          '♻️ <b>Previous session expired</b> — starting a fresh conversation…'
+        );
+        const onFreshStep = async (step: EngineStep) => {
+          logStep(step, null);
+          await sendStep(step);
+        };
+        result = await engine.run(prompt, null, abort.signal, onFreshStep);
+      }
     } finally {
       clearInterval(typing);
       if (activeRun === run) activeRun = null;
