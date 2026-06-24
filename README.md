@@ -200,22 +200,15 @@ Your bot token, chat link, and Claude session ID live in `data/app.db` — they 
 
 ### Updating from a Telegram chat
 
-If you're asking the relayed Claude itself to update the project (i.e. via Telegram), the plain `pm2 restart` step above won't work: it kills the `bun` process hosting your conversation, which kills the spawned `claude`, which aborts the in-flight tool — the update half-finishes and your reply is lost.
+If you're asking the relayed agent itself to update the project (i.e. via Telegram), the plain `pm2 restart` step above won't work: it kills the `bun` process hosting your conversation, which kills the spawned agent, which aborts the in-flight tool — the update half-finishes and your reply is lost.
 
-Detach the work into its own process group with a short delay so the current reply flushes first:
+The repo ships a deploy helper at [`bin/safe-update-relay`](bin/safe-update-relay) that handles this: it detaches into its own process group, delays briefly so the current reply flushes, runs `git pull` → `bun install` (if deps changed) → `bun run build` → `pm2 restart`, waits for the process to come back online, and pings the chat with the result. A failed pull/build aborts before the restart, leaving the running relay untouched. It also re-execs from `/tmp` first so the `git pull` can safely rewrite the in-repo script mid-deploy.
 
 ```bash
-setsid nohup bash -c '
-  sleep 6
-  cd ~/coding-agent-telegram-relay
-  git pull --ff-only
-  bun install
-  bun run build
-  pm2 restart coding-agent-telegram-relay
-' >/dev/null 2>&1 < /dev/null &
+setsid nohup ~/coding-agent-telegram-relay/bin/safe-update-relay >/dev/null 2>&1 < /dev/null &
 ```
 
-`setsid + nohup + &` keep the script alive after `pm2 restart` kills its caller; the `sleep 6` gives the in-flight reply time to flush. Wrap it in a helper script if you do this often (see `CLAUDE.md` for the convention this repo uses).
+`setsid + nohup + &` keep it alive after `pm2 restart` kills its caller. See [`CLAUDE.md`](CLAUDE.md) for config (`RELAY_PROCESS_NAME`, `RELAY_REPO_DIR`) and one-time migration notes.
 
 ## Bot commands
 

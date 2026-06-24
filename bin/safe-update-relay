@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# safe-update-relay [delay_seconds]
+#
+# Full deploy cycle for coding-agent-telegram-relay:
+#   sleep → git pull → bun install → bun run build → pm2 restart → wait → notify
+# Detached-safe: meant to be invoked via `setsid nohup ... &` so it survives
+# the relay process being killed by pm2 mid-flight.
+#
+# This script lives INSIDE the repo, so step 1 (`git pull`) can rewrite the
+# very file that's executing. To stay safe it first re-execs itself from a
+# throwaway copy in /tmp; the copy is what runs the deploy, leaving the repo
+# file free to be updated underneath us.
+#
+# Config (env overrides, with sensible defaults):
+#   RELAY_PROCESS_NAME   pm2 process name      (default: coding-agent-telegram-relay)
+#   RELAY_REPO_DIR       repo checkout to pull (default: the repo this script is in)
+#
+# Notifies the linked Telegram chat at the end with a status summary or error.
+# Does NOT proceed past a failed step — if pull or build fails, the running
+# relay is left untouched so you don't take working state offline.
+
+set -uo pipefail
+
+# ── Re-exec from a stable temp copy ─────────────────────────────────
+# Capture the repo dir from this file's real location BEFORE copying, then run
+# the copy so `git pull` can safely modify the in-repo original.
+if [ -z "${RELAY_REEXEC:-}" ]; then
+  SRC="${BASH_SOURCE[0]}"
+  RELAY_REPO_DIR="${RELAY_REPO_DIR:-$(cd "$(dirname "$SRC")/.." && pwd)}"
+  TMP_SELF="$(mktemp "${TMPDIR:-/tmp}/safe-update-relay.XXXXXX")"
+  cp "$SRC" "$TMP_SELF"
+  chmod +x "$TMP_SELF"
+  export RELAY_REEXEC=1 RELAY_REPO_DIR
+  exec "$TMP_SELF" "$@"
+fi
+
+# From here on we're the /tmp copy. Clean ourselves up on exit.
+trap 'rm -f "$0" 2>/dev/null' EXIT
+
+DELAY="${1:-6}"
+PROCESS_NAME="${RELAY_PROCESS_NAME:-coding-agent-telegram-relay}"
+REPO_DIR="${RELAY_REPO_DIR}"
+DB="$REPO_DIR/data/app.db"
+
+sleep "$DELAY"
+START_TS=$(date +%s%3N)
+
+notify() {
+  local msg="$1"
+  local token chat_id
+  token=$(sqlite3 "$DB" "SELECT value FROM settings WHERE key='telegram_bot_token'" 2>/dev/null || true)
+  chat_id=$(sqlite3 "$DB" "SELECT value FROM settings WHERE key='telegram_chat_id'" 2>/dev/null || true)
+  [ -z "$token" ] || [ -z "$chat_id" ] && return 0
+  curl -s --max-time 10 -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg cid "$chat_id" --arg t "$msg" \
+      '{chat_id: $cid, text: $t, parse_mode: "HTML", disable_web_page_preview: true}')" \
+    >/dev/null
+}
+
+fail() {
+  local step="$1"
+  local detail="$2"
+  notify "$(printf '❌ <b>Update failed at: %s</b>\n<pre>%s</pre>\nRelay left untouched.' \
+    "$step" "$(echo "$detail" | head -c 1500 | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')")"
+  exit 1
+}
+
+cd "$REPO_DIR" || fail "cd" "Could not enter $REPO_DIR"
+
+# Step 1: pull
+OLD_SHA=$(git rev-parse --short HEAD)
+PULL_OUT=$(git pull --ff-only 2>&1) || fail "git pull" "$PULL_OUT"
+NEW_SHA=$(git rev-parse --short HEAD)
+COMMITS=0
+[ "$OLD_SHA" != "$NEW_SHA" ] && COMMITS=$(git rev-list --count "$OLD_SHA..$NEW_SHA")
+
+# Step 2: install deps (only if package.json or lockfile changed)
+NEEDS_INSTALL=0
+if [ "$OLD_SHA" != "$NEW_SHA" ]; then
+  if ! git diff --quiet "$OLD_SHA..$NEW_SHA" -- package.json bun.lock 2>/dev/null; then
+    NEEDS_INSTALL=1
+  fi
+fi
+if [ "$NEEDS_INSTALL" = "1" ]; then
+  INSTALL_OUT=$(bun install 2>&1) || fail "bun install" "$INSTALL_OUT"
+fi
+
+# Step 3: build client
+BUILD_OUT=$(bun run build 2>&1) || fail "bun run build" "$BUILD_OUT"
+
+# Step 4: restart pm2 (here's where the relay dies)
+pm2 restart "$PROCESS_NAME" >/dev/null 2>&1 || fail "pm2 restart" "see pm2 logs"
+
+# Step 5: wait for online (max ~15s)
+STATUS=""
+for _ in $(seq 1 15); do
+  sleep 1
+  STATUS=$(pm2 jlist 2>/dev/null | jq -r ".[] | select(.name==\"$PROCESS_NAME\") | .pm2_env.status" 2>/dev/null || echo "")
+  if [ "$STATUS" = "online" ]; then break; fi
+done
+if [ "$STATUS" != "online" ]; then
+  fail "post-restart wait" "Process did not return to 'online' within 15s; status=$STATUS"
+fi
+
+ELAPSED_MS=$(($(date +%s%3N) - START_TS))
+
+# Step 6: notify success
+if [ "$OLD_SHA" = "$NEW_SHA" ]; then
+  notify "$(printf '✅ <b>Relay updated</b>\nNo new commits. Rebuilt + restarted in %sms.' "$ELAPSED_MS")"
+else
+  DEP_NOTE=""
+  [ "$NEEDS_INSTALL" = "1" ] && DEP_NOTE=" (deps installed)"
+  notify "$(printf '✅ <b>Relay updated</b>\nPulled %s commit(s): <code>%s</code> → <code>%s</code>%s.\nRebuilt + restarted in %sms.' \
+    "$COMMITS" "$OLD_SHA" "$NEW_SHA" "$DEP_NOTE" "$ELAPSED_MS")"
+fi
