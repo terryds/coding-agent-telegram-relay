@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useLocation } from 'wouter';
 import { api, type EngineId, type FeedEvent, type Status } from '../api';
+import { AgentAuth } from '../components/AgentAuth';
 
 type Props = { status: Status; onChange: () => void };
 
@@ -204,6 +205,17 @@ export function Dashboard({ status, onChange }: Props) {
             Clear bot token, chat link, and session.
           </div>
         </button>
+      </section>
+
+      <section>
+        <h2 className="font-medium mb-3 text-sm uppercase tracking-wide text-zinc-400">
+          {engineLabel} authentication
+        </h2>
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-5">
+          {/* Re-mount when the active engine changes so config reloads. Skip the
+              auto-probe here — probing costs a request; the user clicks Check. */}
+          <AgentAuth key={status.engine} engine={status.engine} autoProbe={false} />
+        </div>
       </section>
 
       <section>

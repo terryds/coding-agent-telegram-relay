@@ -18,6 +18,15 @@ export type BotInfo = { id: number; username: string; first_name: string };
 export type EngineId = 'claude' | 'codex';
 export type EngineInfo = { id: EngineId; label: string };
 
+export type AuthMethod = 'subscription' | 'apikey';
+export type AuthConfig = { method: AuthMethod; hasKey: boolean };
+export type EngineAuth = {
+  authed: boolean;
+  method: AuthMethod;
+  hasKey: boolean;
+  error?: string;
+};
+
 export type Status = {
   onboarded: boolean;
   bot_token_set: boolean;
@@ -26,6 +35,7 @@ export type Status = {
   relay_enabled: boolean;
   engine: EngineId;
   engines: EngineInfo[];
+  auth: AuthConfig;
 };
 
 export type AgentCheck = {
@@ -73,6 +83,31 @@ export const api = {
   status: () => request<Status>('/status'),
   agentCheck: (engine: EngineId) =>
     request<AgentCheck>(`/agent-check?engine=${engine}`),
+  authCheck: (engine: EngineId) =>
+    request<EngineAuth>(`/auth-check?engine=${engine}`),
+  authConfig: (engine: EngineId) =>
+    request<AuthConfig>(`/auth-config?engine=${engine}`),
+  setAuthConfig: (
+    engine: EngineId,
+    body: { method?: AuthMethod; apiKey?: string }
+  ) =>
+    request<{ ok: true } & AuthConfig>('/auth-config', {
+      method: 'POST',
+      body: JSON.stringify({ engine, ...body }),
+    }),
+  claudeLoginStart: () =>
+    request<{ url: string }>('/auth/claude-login/start', { method: 'POST' }),
+  claudeLoginCode: (code: string) =>
+    request<{ ok: true }>('/auth/claude-login/code', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
+  claudeLoginStatus: () =>
+    request<{ state: 'idle' | 'awaiting' | 'done' | 'error'; error?: string }>(
+      '/auth/claude-login/status'
+    ),
+  claudeLoginCancel: () =>
+    request<{ ok: true }>('/auth/claude-login/cancel', { method: 'POST' }),
   setEngine: (engine: EngineId) =>
     request<{ ok: true; engine: EngineId }>('/engine', {
       method: 'POST',

@@ -8,14 +8,19 @@
  * inline — emitting steps as they arrive and capturing the final agent message
  * + thread id (the session id used to resume) when the turn completes.
  *
- * Auth is handled out-of-band: the operator runs `codex login` (or sets an API
- * key) on the host, the same way they install/auth the Claude CLI.
+ * Auth follows the engine's configured method (see engine.ts): subscription
+ * login (`codex login`, stored on the host) or a saved API key injected as
+ * OPENAI_API_KEY via `authEnv`. Onboarding probes it with `checkCodexAuth`.
  */
 import {
   ENGINE_LABELS,
+  authEnv,
+  getApiKey,
+  getAuthMethod,
   nowTs,
   truncate,
   type Engine,
+  type EngineAuth,
   type EngineCheck,
   type EngineResult,
   type EngineStep,
@@ -164,7 +169,14 @@ export async function runCodexHeadless(
   try {
     // stdin = /dev/null: the prompt is passed as an arg, and we must not let
     // codex block waiting to read a piped prompt from stdin.
-    proc = Bun.spawn(['codex', ...args], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+    proc = Bun.spawn(['codex', ...args], {
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      // Inject the saved API key when configured for API-key auth; otherwise
+      // inherit the host env unchanged (subscription login lives in codex's auth.json).
+      env: { ...process.env, ...authEnv('codex') },
+    });
   } catch (err) {
     return {
       ok: false,
@@ -268,6 +280,34 @@ export async function runCodexHeadless(
   return { ok: true, text: acc.finalText.trim(), session_id: acc.sessionId };
 }
 
+// A real but minimal turn used to verify auth works end-to-end. Bounded by a
+// timeout so a hung/blocked CLI can't stall onboarding forever.
+const AUTH_PROBE_PROMPT = 'Reply with exactly the word: ok';
+const AUTH_PROBE_TIMEOUT_MS = 45_000;
+
+export async function checkCodexAuth(): Promise<EngineAuth> {
+  const method = getAuthMethod('codex');
+  const hasKey = Boolean(getApiKey('codex'));
+  if (method === 'apikey' && !hasKey) {
+    return { authed: false, method, hasKey, error: 'No API key saved yet.' };
+  }
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), AUTH_PROBE_TIMEOUT_MS);
+  let res: EngineResult;
+  try {
+    res = await runCodexHeadless(AUTH_PROBE_PROMPT, null, ctrl.signal, () => {});
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (res.ok) return { authed: true, method, hasKey };
+  const error = ctrl.signal.aborted
+    ? `Auth probe timed out after ${AUTH_PROBE_TIMEOUT_MS / 1000}s.`
+    : res.error;
+  return { authed: false, method, hasKey, error };
+}
+
 export async function checkCodexInstalled(): Promise<EngineCheck> {
   let versionProc;
   try {
@@ -312,5 +352,6 @@ export const codexEngine: Engine = {
   id: 'codex',
   label: ENGINE_LABELS.codex,
   check: checkCodexInstalled,
+  checkAuth: checkCodexAuth,
   run: runCodexHeadless,
 };

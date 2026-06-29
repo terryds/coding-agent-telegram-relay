@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation } from 'wouter';
 import { api, type AgentCheck, type EngineId, type Status, type BotInfo } from '../api';
+import { AgentAuth } from '../components/AgentAuth';
 
 type Props = { status: Status; onChange: () => void };
 
@@ -23,6 +24,7 @@ export function Onboarding({ status, onChange }: Props) {
   const [engine, setEngine] = useState<EngineId>(status.engine);
   const [agentCheck, setAgentCheck] = useState<AgentCheck | null>(null);
   const [checking, setChecking] = useState(false);
+  const [authed, setAuthed] = useState(false);
 
   const [token, setToken] = useState('');
   const [savingToken, setSavingToken] = useState(false);
@@ -34,10 +36,17 @@ export function Onboarding({ status, onChange }: Props) {
   const [captureError, setCaptureError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
-  // Decide which step to land on.
+  // Decide which step to land on. Step 1 isn't done until the CLI is both
+  // installed and authenticated.
   const agentOk = agentCheck?.installed === true;
   const step =
-    !agentOk ? 1 : !status.bot_token_set || !bot ? 2 : !capturedId ? 3 : 4;
+    !agentOk || !authed
+      ? 1
+      : !status.bot_token_set || !bot
+        ? 2
+        : !capturedId
+          ? 3
+          : 4;
 
   const runAgentCheck = async (id: EngineId) => {
     setChecking(true);
@@ -58,6 +67,7 @@ export function Onboarding({ status, onChange }: Props) {
     if (id === engine && agentCheck) return;
     setEngine(id);
     setAgentCheck(null);
+    setAuthed(false);
     try {
       await api.setEngine(id);
       onChange();
@@ -154,9 +164,9 @@ export function Onboarding({ status, onChange }: Props) {
       <ol className="space-y-6">
         <StepCard
           n={1}
-          title="Choose your coding agent"
+          title="Choose & authenticate your coding agent"
           active={step === 1}
-          done={agentOk}
+          done={agentOk && authed}
         >
           <p className="text-zinc-400 text-sm mb-3">
             Pick which agent the relay drives. You can switch later from the
@@ -182,18 +192,23 @@ export function Onboarding({ status, onChange }: Props) {
           {checking ? (
             <p className="text-zinc-400 text-sm">Checking…</p>
           ) : agentOk ? (
-            <div className="text-sm space-y-1">
-              <p className="text-emerald-400">Found {INSTALL_DOCS[engine].label}.</p>
-              {agentCheck?.version && (
-                <p className="text-zinc-400">
-                  Version: <code className="text-zinc-200">{agentCheck.version}</code>
-                </p>
-              )}
-              {agentCheck?.path && (
-                <p className="text-zinc-400">
-                  Path: <code className="text-zinc-200">{agentCheck.path}</code>
-                </p>
-              )}
+            <div className="text-sm space-y-4">
+              <div className="space-y-1">
+                <p className="text-emerald-400">Found {INSTALL_DOCS[engine].label}.</p>
+                {agentCheck?.version && (
+                  <p className="text-zinc-400">
+                    Version: <code className="text-zinc-200">{agentCheck.version}</code>
+                  </p>
+                )}
+                {agentCheck?.path && (
+                  <p className="text-zinc-400">
+                    Path: <code className="text-zinc-200">{agentCheck.path}</code>
+                  </p>
+                )}
+              </div>
+              <div className="border-t border-zinc-800 pt-4">
+                <AgentAuth engine={engine} onAuthed={setAuthed} />
+              </div>
             </div>
           ) : (
             <div className="text-sm space-y-3">

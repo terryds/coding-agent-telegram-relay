@@ -9,7 +9,8 @@
 #   node, npm  — only as the vehicle for pm2
 #   pm2        — process manager for production
 #   jq, sqlite3 — used by bin/safe-update-relay (Telegram notify reads app.db)
-CORE_DEPS=(git curl bun node npm pm2 jq sqlite3)
+#   python3    — PTY bridge for in-dashboard Claude subscription sign-in
+CORE_DEPS=(git curl bun node npm pm2 jq sqlite3 python3)
 
 # At least one of these is needed to actually do anything; auth is manual.
 AGENT_CLIS=(claude codex)

@@ -8,8 +8,18 @@ import {
   getEngineId,
   setEngineId,
   isEngineId,
+  isAuthMethod,
+  getAuthConfig,
+  setAuthMethod,
+  setApiKey,
 } from './engine.ts';
 import { getEngine } from './engines.ts';
+import {
+  startClaudeLogin,
+  submitClaudeLoginCode,
+  cancelClaudeLogin,
+  claudeLoginStatus,
+} from './claude-login.ts';
 import {
   startListener,
   isRelayEnabled,
@@ -80,6 +90,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
       relay_enabled: isRelayEnabled(),
       engine: getEngineId(),
       engines: ENGINE_IDS.map((id) => ({ id, label: ENGINE_LABELS[id] })),
+      auth: getAuthConfig(getEngineId()),
     });
   }
 
@@ -90,6 +101,65 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     const id = q && isEngineId(q) ? q : p === '/claude-check' ? 'claude' : getEngineId();
     const result = await getEngine(id).check();
     return json(result);
+  }
+
+  // Live-probe whether the given engine's CLI is authenticated. Slow (runs a
+  // tiny real turn). `?engine=claude|codex` (defaults to the active engine).
+  if (p === '/auth-check' && m === 'GET') {
+    const q = url.searchParams.get('engine');
+    const id = q && isEngineId(q) ? q : getEngineId();
+    return json(await getEngine(id).checkAuth());
+  }
+
+  // Read the persisted auth setup (method + whether a key is saved) without a
+  // probe. Used by the dashboard to render the current setting cheaply.
+  if (p === '/auth-config' && m === 'GET') {
+    const q = url.searchParams.get('engine');
+    const id = q && isEngineId(q) ? q : getEngineId();
+    return json(getAuthConfig(id));
+  }
+
+  // Update auth setup: switch method and/or save (or clear) the API key.
+  if (p === '/auth-config' && m === 'POST') {
+    const body = await readBody<{ engine?: string; method?: string; apiKey?: string }>(req);
+    const id = (body.engine || getEngineId()).trim();
+    if (!isEngineId(id)) return err(400, 'engine must be "claude" or "codex"');
+    if (body.method !== undefined) {
+      if (!isAuthMethod(body.method)) {
+        return err(400, 'method must be "subscription" or "apikey"');
+      }
+      setAuthMethod(id, body.method);
+    }
+    // An explicit empty string clears the saved key; undefined leaves it alone.
+    if (body.apiKey !== undefined) setApiKey(id, body.apiKey);
+    return json({ ok: true, ...getAuthConfig(id) });
+  }
+
+  // Claude subscription sign-in, driven from the dashboard (no terminal).
+  // Start → returns the authorize URL; the user authorizes and pastes the code.
+  if (p === '/auth/claude-login/start' && m === 'POST') {
+    try {
+      return json(await startClaudeLogin());
+    } catch (e) {
+      return err(400, e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  if (p === '/auth/claude-login/code' && m === 'POST') {
+    const body = await readBody<{ code?: string }>(req);
+    const result = await submitClaudeLoginCode(body.code || '');
+    if (!result.ok) return err(400, result.error || 'Sign-in failed.');
+    return json({ ok: true });
+  }
+
+  // Poll the in-progress sign-in: { state: 'idle'|'awaiting'|'done'|'error' }.
+  if (p === '/auth/claude-login/status' && m === 'GET') {
+    return json(claudeLoginStatus());
+  }
+
+  if (p === '/auth/claude-login/cancel' && m === 'POST') {
+    cancelClaudeLogin();
+    return json({ ok: true });
   }
 
   if (p === '/engine' && m === 'GET') {

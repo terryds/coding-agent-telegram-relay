@@ -1,11 +1,12 @@
 import type {
   AskQuestion,
   Engine,
+  EngineAuth,
   EngineCheck,
   EngineResult,
   OnStep,
 } from './engine.ts';
-import { ENGINE_LABELS } from './engine.ts';
+import { ENGINE_LABELS, authEnv, getApiKey, getAuthMethod } from './engine.ts';
 import { watchSession } from './claude-stream.ts';
 
 // Kept as aliases for back-compat with existing imports across the server.
@@ -47,6 +48,9 @@ export async function runClaudeHeadless(
     proc = Bun.spawn(['claude', ...args], {
       stdout: 'pipe',
       stderr: 'pipe',
+      // Inject the saved API key when configured for API-key auth; otherwise
+      // inherit the host env unchanged (subscription login lives in ~/.claude).
+      env: { ...process.env, ...authEnv('claude') },
     });
   } catch (err) {
     return {
@@ -197,6 +201,59 @@ function tryParseOutput(
   }
 }
 
+export type ClaudeAuthStatus = { loggedIn: boolean; authMethod?: string };
+
+/**
+ * Read the CLI's auth status cheaply via `claude auth status --json` (no billed
+ * request). Injects the engine's configured auth env so a saved API key / OAuth
+ * token is reflected. Note: this reports whether a credential is *configured*,
+ * not that it is still valid — a present-but-bad key reads as logged in.
+ */
+export async function claudeAuthStatus(): Promise<ClaudeAuthStatus | null> {
+  try {
+    const proc = Bun.spawn(['claude', 'auth', 'status', '--json'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, ...authEnv('claude') },
+    });
+    const [out] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    const j = JSON.parse(out) as { loggedIn?: boolean; authMethod?: string };
+    return {
+      loggedIn: j?.loggedIn === true,
+      authMethod: typeof j?.authMethod === 'string' ? j.authMethod : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function checkClaudeAuth(): Promise<EngineAuth> {
+  const method = getAuthMethod('claude');
+  const hasKey = Boolean(getApiKey('claude'));
+  if (method === 'apikey' && !hasKey) {
+    return { authed: false, method, hasKey, error: 'No API key saved yet.' };
+  }
+
+  const status = await claudeAuthStatus();
+  if (!status) {
+    return { authed: false, method, hasKey, error: "Couldn't read `claude auth status`." };
+  }
+  if (status.loggedIn) return { authed: true, method, hasKey };
+  return {
+    authed: false,
+    method,
+    hasKey,
+    error:
+      method === 'apikey'
+        ? 'Saved API key not detected by the CLI.'
+        : 'Not signed in yet.',
+  };
+}
+
 export async function checkClaudeInstalled(): Promise<ClaudeCheck> {
   let versionProc;
   try {
@@ -253,6 +310,7 @@ export const claudeEngine: Engine = {
   id: 'claude',
   label: ENGINE_LABELS.claude,
   check: checkClaudeInstalled,
+  checkAuth: checkClaudeAuth,
   async run(prompt, sessionId, signal, onStep: OnStep): Promise<EngineResult> {
     // The JSONL file is named after the session id. On a brand-new session we
     // don't know it yet, so live streaming only kicks in once a session exists

@@ -51,6 +51,7 @@ ensure() {
   printf '  %s…%s installing %s\n' "$C_WARN" "$C_RST" "$tool"
   case "$tool" in
     git|curl|jq|sqlite3) apt_install "$tool" ;;
+    python3)             apt_install "$tool" ;;
     bun)                 install_bun ;;
     node|npm)            install_node ;;
     pm2)                 install_pm2 ;;
