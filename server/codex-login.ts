@@ -11,6 +11,7 @@
  *
  * Only one login runs at a time.
  */
+import { homedir } from 'node:os';
 import { codexLoginStatus } from './codex-runner.ts';
 
 type Subproc = Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
@@ -76,7 +77,12 @@ export async function startCodexLogin(): Promise<{ url: string; code: string }> 
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
-      env: { ...process.env },
+      // pm2 can run the relay with a stripped env; backfill HOME/TERM.
+      env: {
+        ...process.env,
+        HOME: process.env.HOME || homedir(),
+        TERM: process.env.TERM || 'xterm-256color',
+      },
     });
   } catch (err) {
     throw new Error(

@@ -13,8 +13,22 @@
  *
  * Only one login runs at a time.
  */
+import { homedir } from 'node:os';
 import { setOauthToken } from './engine.ts';
 import { claudeAuthStatus } from './claude-runner.ts';
+
+/**
+ * Env for the interactive CLI. pm2 runs the relay with a stripped environment
+ * (often no TERM, sometimes no HOME), and the raw-mode TUI silently exits 0 with
+ * no output when TERM is missing on Linux — so backfill sane defaults.
+ */
+function loginEnv(): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    HOME: process.env.HOME || homedir(),
+    TERM: process.env.TERM || 'xterm-256color',
+  };
+}
 
 type Subproc = Bun.Subprocess<'pipe', 'pipe', 'pipe'>;
 
@@ -142,7 +156,7 @@ export async function startClaudeLogin(): Promise<{ url: string }> {
       stdin: 'pipe',
       stdout: 'pipe',
       stderr: 'pipe',
-      env: { ...process.env },
+      env: loginEnv(),
     });
   } catch (err) {
     throw new Error(
