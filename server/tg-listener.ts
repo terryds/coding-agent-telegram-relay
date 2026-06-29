@@ -326,6 +326,11 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
     setSetting(CAPTURED_KEY, incomingChatId);
     setSetting('telegram_chat_id', incomingChatId);
     db.prepare('DELETE FROM settings WHERE key = ?').run(CAPTURE_KEY);
+    // Linking the chat completes onboarding — turn the relay on so the user can
+    // talk to the agent right away.
+    setRelayEnabled(true);
+    applyBotCommands().catch(() => {});
+    const label = ENGINE_LABELS[getEngineId()];
     // Acknowledge via the token used for this very chat — sendTelegram reads chat_id from settings.
     await sendTelegram(
       [
@@ -333,7 +338,7 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
         '',
         `Chat ID: <code>${incomingChatId}</code>`,
         '',
-        'Onboarding complete. Head back to the dashboard to enable the relay.',
+        `You can now talk to ${escapeHtml(label)} via Telegram — just say "Hi!"`,
       ].join('\n')
     );
     return;

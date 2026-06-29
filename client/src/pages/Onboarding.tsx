@@ -367,14 +367,14 @@ export function Onboarding({ status, onChange }: Props) {
           <div>
             <h3 className="font-medium text-emerald-200">All set</h3>
             <p className="text-sm text-emerald-300/80 mt-0.5">
-              Enable the relay and head to the dashboard.
+              Your chat is linked and the relay is live — message your bot any time.
             </p>
           </div>
           <button
             onClick={finish}
             className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded text-sm font-medium"
           >
-            Enable & continue
+            Go to dashboard
           </button>
         </div>
       )}
