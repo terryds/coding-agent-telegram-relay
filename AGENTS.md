@@ -10,6 +10,18 @@ engine is a global setting (switchable via the dashboard or the `/engine`
 Telegram command); engine implementations live behind `server/engine.ts` /
 `server/engines.ts`.
 
+## Replying over Telegram
+
+When your reply will be sent back to Telegram, output URLs as bare, unformatted
+links — never wrap them in Markdown emphasis (`**…**`, `*…*`, `_…_`) or link
+syntax. Telegram's parser mangles a URL wrapped in bold (e.g.
+`**https://example.com**`), producing a broken/incorrect link. Just paste the
+raw URL on its own:
+
+```
+https://example.com/#project/foo
+```
+
 ## Setup
 
 Install the system dependencies (bun, Node, pm2, git, jq, sqlite3):
