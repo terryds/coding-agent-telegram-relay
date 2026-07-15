@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useLocation } from 'wouter';
-import { api, type EngineId, type FeedEvent, type GroupLink, type Status } from '../api';
+import {
+  api,
+  type EngineId,
+  type FeedEvent,
+  type GroupCaptureMode,
+  type GroupLink,
+  type Status,
+} from '../api';
 import { AgentAuth } from '../components/AgentAuth';
 
 type Props = { status: Status; onChange: () => void };
@@ -260,6 +267,7 @@ function GroupTopicCard({
   onChange: () => void;
 }) {
   const [capturing, setCapturing] = useState(false);
+  const [mode, setMode] = useState<GroupCaptureMode>('topic');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
@@ -268,7 +276,7 @@ function GroupTopicCard({
     setError(null);
     setBusy(true);
     try {
-      await api.groupStartCapture();
+      await api.groupStartCapture(mode);
       setCapturing(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -335,7 +343,7 @@ function GroupTopicCard({
             {group.topic_id ? (
               <>topic {group.topic_name ? <span className="font-medium">{group.topic_name}</span> : <code>{group.topic_id}</code>}</>
             ) : (
-              'whole group (no topic)'
+              'entire group'
             )}
           </p>
           <p className="text-zinc-500 text-xs">
@@ -347,8 +355,10 @@ function GroupTopicCard({
             )}
           </p>
           <p className="text-zinc-400 text-xs">
-            The relay only reacts to messages in this exact topic — other topics and
-            groups are ignored. Your private chat keeps working as usual.
+            {group.topic_id
+              ? 'The relay only reacts to messages in this exact topic — other topics and groups are ignored.'
+              : 'The relay reacts to every message in this group.'}{' '}
+            Your private chat keeps working as usual.
           </p>
         </div>
       ) : (
@@ -377,12 +387,30 @@ function GroupTopicCard({
               (<span className="font-mono">/setprivacy</span> → Disable) or make the bot a
               group admin.
             </li>
-            <li>Send any message in the topic you want to link.</li>
+            {mode === 'topic' ? (
+              <>
+                <li>
+                  Enable <span className="font-medium">Topics</span> in the group settings and
+                  create your topic (if you haven't yet).
+                </li>
+                <li>Send any message inside that topic.</li>
+              </>
+            ) : (
+              <li>Send any message in the group.</li>
+            )}
           </ol>
+          {mode === 'topic' && (
+            <p className="text-zinc-500 text-xs">
+              Messages outside a topic are ignored while linking — the bot replies with a
+              hint and keeps waiting until it sees a topic message.
+            </p>
+          )}
           <div className="flex items-center gap-3">
             <span className="inline-flex items-center gap-2 text-zinc-400">
               <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
-              Waiting for a message in the group…
+              {mode === 'topic'
+                ? 'Waiting for a message in a topic…'
+                : 'Waiting for a message in the group…'}
             </span>
             <button
               onClick={cancelCapture}
@@ -393,23 +421,57 @@ function GroupTopicCard({
           </div>
         </div>
       ) : (
-        <div className="flex gap-2">
-          <button
-            onClick={startCapture}
-            disabled={busy}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm font-medium"
-          >
-            {group ? 'Re-link (listen again)' : 'Link a group topic'}
-          </button>
-          {group && (
+        <div className="space-y-3">
+          <div>
+            <div className="text-xs uppercase tracking-wide text-zinc-500 mb-1.5">
+              Link scope
+            </div>
+            <div className="inline-flex rounded-lg border border-zinc-700 overflow-hidden text-sm font-medium">
+              {(
+                [
+                  { id: 'topic', label: 'Specific topic' },
+                  { id: 'group', label: 'Entire group' },
+                ] as Array<{ id: GroupCaptureMode; label: string }>
+              ).map((m) => (
+                <button
+                  key={m.id}
+                  onClick={() => setMode(m.id)}
+                  disabled={busy}
+                  className={[
+                    'px-3 py-1.5 transition-colors disabled:opacity-50',
+                    mode === m.id
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-zinc-900 text-zinc-400 hover:bg-zinc-800',
+                  ].join(' ')}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-zinc-500 text-xs mt-1.5">
+              {mode === 'topic'
+                ? 'Link one forum topic — the bot only reacts inside that topic.'
+                : 'Link the whole group — the bot reacts to every message in it.'}
+            </p>
+          </div>
+          <div className="flex gap-2">
             <button
-              onClick={unlink}
+              onClick={startCapture}
               disabled={busy}
-              className="px-4 py-2 border border-red-900/60 bg-red-950/20 hover:bg-red-950/40 text-red-200 rounded text-sm font-medium disabled:opacity-50"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm font-medium"
             >
-              Unlink
+              {group ? 'Re-link (listen again)' : 'Start listening'}
             </button>
-          )}
+            {group && (
+              <button
+                onClick={unlink}
+                disabled={busy}
+                className="px-4 py-2 border border-red-900/60 bg-red-950/20 hover:bg-red-950/40 text-red-200 rounded text-sm font-medium disabled:opacity-50"
+              >
+                Unlink
+              </button>
+            )}
+          </div>
         </div>
       )}
 

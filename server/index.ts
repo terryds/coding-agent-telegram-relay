@@ -33,6 +33,7 @@ import {
   getGroupLink,
   unlinkGroup,
   setGroupCaptureMode,
+  getGroupCaptureMode,
   isGroupCapturing,
   applyBotCommands,
   skipBacklog,
@@ -250,17 +251,25 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   // capturing=false + group!=null as "done".
   if (p === '/group/start-capture' && m === 'POST') {
     if (!getSetting('telegram_bot_token')) return err(400, 'Save a bot token first');
+    const body = await readBody<{ mode?: string }>(req);
+    // 'topic' waits for a message inside a forum topic; 'group' links the
+    // whole group off any group message. Default: topic.
+    const mode = body.mode === 'group' ? 'group' : 'topic';
     await skipBacklog();
-    setGroupCaptureMode(true);
-    return json({ ok: true });
+    setGroupCaptureMode(mode);
+    return json({ ok: true, mode });
   }
 
   if (p === '/group/status' && m === 'GET') {
-    return json({ capturing: isGroupCapturing(), group: getGroupLink() });
+    return json({
+      capturing: isGroupCapturing(),
+      mode: getGroupCaptureMode(),
+      group: getGroupLink(),
+    });
   }
 
   if (p === '/group/cancel-capture' && m === 'POST') {
-    setGroupCaptureMode(false);
+    setGroupCaptureMode(null);
     return json({ ok: true });
   }
 

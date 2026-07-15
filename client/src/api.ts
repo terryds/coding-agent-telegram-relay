@@ -34,6 +34,8 @@ export type EngineAuth = {
   checked_at?: number;
 };
 
+export type GroupCaptureMode = 'topic' | 'group';
+
 export type GroupLink = {
   chat_id: string;
   topic_id: string | null; // null = plain group / the General topic
@@ -146,12 +148,17 @@ export const api = {
   cancelCapture: () =>
     request<{ ok: true }>('/onboarding/cancel-capture', { method: 'POST' }),
   captured: () => request<{ chat_id: string | null }>('/onboarding/captured'),
-  groupStartCapture: () =>
-    request<{ ok: true }>('/group/start-capture', { method: 'POST' }),
+  groupStartCapture: (mode: GroupCaptureMode) =>
+    request<{ ok: true; mode: GroupCaptureMode }>('/group/start-capture', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
   groupCancelCapture: () =>
     request<{ ok: true }>('/group/cancel-capture', { method: 'POST' }),
   groupStatus: () =>
-    request<{ capturing: boolean; group: GroupLink | null }>('/group/status'),
+    request<{ capturing: boolean; mode: GroupCaptureMode | null; group: GroupLink | null }>(
+      '/group/status'
+    ),
   groupUnlink: () => request<{ ok: true }>('/group/unlink', { method: 'POST' }),
   setRelay: (enabled: boolean) =>
     request<{ ok: true; enabled: boolean }>('/relay', {

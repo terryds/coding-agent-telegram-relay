@@ -99,13 +99,44 @@ export function unlinkGroup(): void {
   deleteSetting(GROUP_CAPTURE_KEY);
 }
 
-export function setGroupCaptureMode(on: boolean): void {
-  if (on) setSetting(GROUP_CAPTURE_KEY, '1');
+/** What the user chose to link: a specific forum topic, or the whole group. */
+export type GroupCaptureMode = 'topic' | 'group';
+
+export function setGroupCaptureMode(mode: GroupCaptureMode | null): void {
+  if (mode) setSetting(GROUP_CAPTURE_KEY, mode);
   else deleteSetting(GROUP_CAPTURE_KEY);
 }
 
+export function getGroupCaptureMode(): GroupCaptureMode | null {
+  const v = getSetting(GROUP_CAPTURE_KEY);
+  if (v === 'topic' || v === 'group') return v;
+  return v ? 'group' : null; // legacy '1' behaved like whole-group capture
+}
+
 export function isGroupCapturing(): boolean {
-  return getSetting(GROUP_CAPTURE_KEY) === '1';
+  return getGroupCaptureMode() !== null;
+}
+
+// During topic-mode capture, non-topic group messages keep the capture waiting.
+// Reply with a hint so the user isn't left wondering — but at most once per
+// 30s per chat, so a burst of setup chatter doesn't get a hint per message.
+const captureHintSentAt = new Map<string, number>();
+
+async function sendGroupCaptureHint(chatId: string): Promise<void> {
+  const last = captureHintSentAt.get(chatId) ?? 0;
+  if (Date.now() - last < 30_000) return;
+  captureHintSentAt.set(chatId, Date.now());
+  await sendTelegram(
+    [
+      '⏳ <b>Still waiting for a topic message.</b>',
+      '',
+      "This message isn't inside a topic, so nothing was linked yet.",
+      'Create/open a topic in this group and send a message there.',
+      '',
+      "<i>No Topics in this group? Enable them in the group settings — or pick “Entire group” in the dashboard instead.</i>",
+    ].join('\n'),
+    { target: { chatId } }
+  );
 }
 
 function setOffset(id: number): void {
@@ -379,8 +410,16 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
   const topicThreadId =
     msg.is_topic_message && msg.message_thread_id != null ? msg.message_thread_id : null;
 
-  // Group-topic capture: the first group message during capture mode wins.
-  if (isGroupCapturing() && isGroupChat) {
+  // Group-topic capture: the first matching group message during capture wins.
+  const captureMode = getGroupCaptureMode();
+  if (captureMode && isGroupChat) {
+    // Topic mode: only a message inside a forum topic completes the link.
+    // Anything else (General, a non-forum group, service chatter) keeps the
+    // capture waiting — reply with a hint so the user knows why.
+    if (captureMode === 'topic' && topicThreadId == null) {
+      await sendGroupCaptureHint(incomingChatId);
+      return;
+    }
     setSetting(GROUP_CHAT_KEY, incomingChatId);
     if (topicThreadId != null) setSetting(GROUP_TOPIC_KEY, String(topicThreadId));
     else deleteSetting(GROUP_TOPIC_KEY);
@@ -398,7 +437,9 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
         '✅ <b>Group linked!</b>',
         '',
         `Chat ID: <code>${incomingChatId}</code>`,
-        topicThreadId != null ? `Topic ID: <code>${topicThreadId}</code>` : 'Topic: General (whole group)',
+        topicThreadId != null
+          ? `Topic ID: <code>${topicThreadId}</code>`
+          : 'Scope: entire group',
         '',
         `You can now talk to ${escapeHtml(label)} here — just say "Hi!"`,
       ].join('\n'),
@@ -409,6 +450,9 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
 
   // Onboarding capture: the first message during capture mode wins.
   if (isCapturing()) {
+    // A group message can't be the primary (private) chat — and if a group
+    // capture is pending it was handled above. Don't let it hijack onboarding.
+    if (isGroupChat) return;
     setSetting(CAPTURED_KEY, incomingChatId);
     setSetting('telegram_chat_id', incomingChatId);
     db.prepare('DELETE FROM settings WHERE key = ?').run(CAPTURE_KEY);
@@ -430,13 +474,16 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
     return;
   }
 
-  // Authorization: the onboarded private chat, or the linked group topic.
+  // Authorization: the onboarded private chat, or the linked group. A link
+  // with a topic id only matches that exact topic; a whole-group link (no
+  // topic id) matches anywhere in the group.
   const group = getGroupLink();
   const fromPrivate = Boolean(expectedChatId && incomingChatId === expectedChatId);
   const fromGroupTopic = Boolean(
     group &&
       incomingChatId === group.chat_id &&
-      (topicThreadId != null ? String(topicThreadId) : null) === group.topic_id
+      (group.topic_id === null ||
+        (topicThreadId != null && String(topicThreadId) === group.topic_id))
   );
   if (!fromPrivate && !fromGroupTopic) {
     console.log(`[tg-listener] ignored message from unauthorized chat ${incomingChatId}`);
