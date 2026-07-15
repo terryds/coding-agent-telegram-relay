@@ -171,6 +171,46 @@ export function getAuthConfig(id: EngineId): AuthConfig {
   return { method: getAuthMethod(id), hasKey: Boolean(getApiKey(id)) };
 }
 
+// ── Cached auth probe ───────────────────────────────────────────────
+//
+// A live probe is slow and consumes a real request, so the dashboard shouldn't
+// re-probe on every load. Persist the last probe's outcome and serve that
+// instantly; it's invalidated whenever the auth setup changes.
+
+export type AuthProbeRecord = {
+  authed: boolean;
+  method: AuthMethod;
+  error?: string;
+  checked_at: number;
+};
+
+const authProbeKey = (id: EngineId) => `auth_probe_${id}`;
+
+export function getLastAuthProbe(id: EngineId): AuthProbeRecord | null {
+  const raw = getSetting(authProbeKey(id));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as AuthProbeRecord;
+  } catch {
+    return null;
+  }
+}
+
+export function saveAuthProbe(id: EngineId, probe: EngineAuth): AuthProbeRecord {
+  const rec: AuthProbeRecord = {
+    authed: probe.authed,
+    method: probe.method,
+    ...(probe.error ? { error: probe.error } : {}),
+    checked_at: Date.now(),
+  };
+  setSetting(authProbeKey(id), JSON.stringify(rec));
+  return rec;
+}
+
+export function clearAuthProbe(id: EngineId): void {
+  deleteSetting(authProbeKey(id));
+}
+
 /**
  * Env overrides to apply when spawning the CLI:
  *  - API-key auth: inject the saved key under the var the CLI reads.

@@ -21,6 +21,16 @@ const DOCS: Record<
   },
 };
 
+function timeAgo(ts: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
 type Props = {
   engine: EngineId;
   /** Run a live probe on mount / engine change. Onboarding wants this; the
@@ -38,6 +48,7 @@ export function AgentAuth({ engine, autoProbe = true, onAuthed }: Props) {
   const [auth, setAuth] = useState<EngineAuth | null>(null);
   const [checking, setChecking] = useState(false);
   const [probed, setProbed] = useState(false);
+  const [checkedAt, setCheckedAt] = useState<number | null>(null);
 
   const [key, setKey] = useState('');
   const [saving, setSaving] = useState(false);
@@ -64,6 +75,7 @@ export function AgentAuth({ engine, autoProbe = true, onAuthed }: Props) {
       setMethod(r.method);
       setHasKey(r.hasKey);
       setProbed(true);
+      setCheckedAt(r.checked_at ?? Date.now());
       onAuthed?.(r.authed);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -77,16 +89,27 @@ export function AgentAuth({ engine, autoProbe = true, onAuthed }: Props) {
       const c = await api.authConfig(engine);
       setMethod(c.method);
       setHasKey(c.hasKey);
+      // The server caches the last probe's outcome — show it instantly instead
+      // of demanding a click. Only probe live when nothing was ever cached.
+      if (c.last) {
+        setAuth({ authed: c.last.authed, method: c.last.method, hasKey: c.hasKey, error: c.last.error });
+        setProbed(true);
+        setCheckedAt(c.last.checked_at);
+        onAuthed?.(c.last.authed);
+      } else {
+        await probe();
+      }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
   };
 
   useEffect(() => {
-    // Reset per-engine state, then either probe (onboarding) or just load the
-    // saved config (dashboard) so we don't spend a request on every page load.
+    // Reset per-engine state, then either probe (onboarding) or show the
+    // cached result (dashboard) so we don't spend a request on every page load.
     setAuth(null);
     setProbed(false);
+    setCheckedAt(null);
     setKey('');
     resetLogin();
     resetCodexLogin();
@@ -257,9 +280,17 @@ export function AgentAuth({ engine, autoProbe = true, onAuthed }: Props) {
           ) : authed ? (
             <span className="text-emerald-400">
               Authenticated via {method === 'apikey' ? 'API key' : 'subscription login'}.
+              {checkedAt && (
+                <span className="text-zinc-500"> Checked {timeAgo(checkedAt)}.</span>
+              )}
             </span>
           ) : probed ? (
-            <span className="text-amber-400">Not authenticated.</span>
+            <span className="text-amber-400">
+              Not authenticated.
+              {checkedAt && (
+                <span className="text-zinc-500"> Checked {timeAgo(checkedAt)}.</span>
+              )}
+            </span>
           ) : (
             <span className="text-zinc-400">
               Auth not checked yet ({method === 'apikey' ? 'API key' : 'subscription login'}

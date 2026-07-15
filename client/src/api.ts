@@ -19,12 +19,19 @@ export type EngineId = 'claude' | 'codex';
 export type EngineInfo = { id: EngineId; label: string };
 
 export type AuthMethod = 'subscription' | 'apikey';
-export type AuthConfig = { method: AuthMethod; hasKey: boolean };
+export type AuthProbe = {
+  authed: boolean;
+  method: AuthMethod;
+  error?: string;
+  checked_at: number;
+};
+export type AuthConfig = { method: AuthMethod; hasKey: boolean; last?: AuthProbe | null };
 export type EngineAuth = {
   authed: boolean;
   method: AuthMethod;
   hasKey: boolean;
   error?: string;
+  checked_at?: number;
 };
 
 export type GroupLink = {

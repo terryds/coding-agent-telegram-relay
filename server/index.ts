@@ -12,6 +12,9 @@ import {
   getAuthConfig,
   setAuthMethod,
   setApiKey,
+  getLastAuthProbe,
+  saveAuthProbe,
+  clearAuthProbe,
 } from './engine.ts';
 import { getEngine } from './engines.ts';
 import {
@@ -98,7 +101,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
       group: getGroupLink(),
       engine: getEngineId(),
       engines: ENGINE_IDS.map((id) => ({ id, label: ENGINE_LABELS[id] })),
-      auth: getAuthConfig(getEngineId()),
+      auth: { ...getAuthConfig(getEngineId()), last: getLastAuthProbe(getEngineId()) },
     });
   }
 
@@ -116,15 +119,20 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   if (p === '/auth-check' && m === 'GET') {
     const q = url.searchParams.get('engine');
     const id = q && isEngineId(q) ? q : getEngineId();
-    return json(await getEngine(id).checkAuth());
+    const result = await getEngine(id).checkAuth();
+    // Cache the outcome so the dashboard can show auth state without
+    // re-probing on every load.
+    const rec = saveAuthProbe(id, result);
+    return json({ ...result, checked_at: rec.checked_at });
   }
 
-  // Read the persisted auth setup (method + whether a key is saved) without a
-  // probe. Used by the dashboard to render the current setting cheaply.
+  // Read the persisted auth setup (method + whether a key is saved) and the
+  // last cached probe result, without probing. Used by the dashboard to render
+  // the current state cheaply.
   if (p === '/auth-config' && m === 'GET') {
     const q = url.searchParams.get('engine');
     const id = q && isEngineId(q) ? q : getEngineId();
-    return json(getAuthConfig(id));
+    return json({ ...getAuthConfig(id), last: getLastAuthProbe(id) });
   }
 
   // Update auth setup: switch method and/or save (or clear) the API key.
@@ -137,9 +145,13 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
         return err(400, 'method must be "subscription" or "apikey"');
       }
       setAuthMethod(id, body.method);
+      clearAuthProbe(id); // setup changed — the cached probe no longer applies
     }
     // An explicit empty string clears the saved key; undefined leaves it alone.
-    if (body.apiKey !== undefined) setApiKey(id, body.apiKey);
+    if (body.apiKey !== undefined) {
+      setApiKey(id, body.apiKey);
+      clearAuthProbe(id);
+    }
     return json({ ok: true, ...getAuthConfig(id) });
   }
 
