@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
-import { getSetting, setSetting, db, logMessage, logStep } from './db.ts';
+import { getSetting, setSetting, deleteSetting, db, logMessage, logStep } from './db.ts';
 import {
   getTelegramConfig,
   getUpdatesRaw,
@@ -9,6 +9,7 @@ import {
   sendChatAction,
   setMyCommands,
   downloadTelegramFile,
+  type SendTarget,
   type TelegramMessage,
   type TelegramUpdate,
 } from './telegram.ts';
@@ -34,6 +35,11 @@ const CLAUDE_SESSION_KEY = 'claude_session_id';
 const ENABLED_KEY = 'relay_enabled';
 const CAPTURE_KEY = 'capture_chat_id';
 const CAPTURED_KEY = 'captured_chat_id';
+const GROUP_CAPTURE_KEY = 'capture_group_topic';
+const GROUP_CHAT_KEY = 'group_chat_id';
+const GROUP_TOPIC_KEY = 'group_topic_id';
+const GROUP_TITLE_KEY = 'group_chat_title';
+const GROUP_TOPIC_NAME_KEY = 'group_topic_name';
 
 export function isRelayEnabled(): boolean {
   return getSetting(ENABLED_KEY) === '1';
@@ -58,6 +64,48 @@ export function getCapturedChatId(): string | null {
 
 function isCapturing(): boolean {
   return getSetting(CAPTURE_KEY) === '1';
+}
+
+// ── Group-topic link ────────────────────────────────────────────────
+//
+// Besides the private chat linked during onboarding, the relay can be bound to
+// one group (optionally a specific forum topic inside it). Linking works like
+// onboarding: enable capture mode from the dashboard, send any message in the
+// target group/topic, and the relay records the chat id + topic thread id.
+
+export type GroupLink = {
+  chat_id: string;
+  topic_id: string | null; // null = plain group / the General topic
+  chat_title: string | null;
+  topic_name: string | null;
+};
+
+export function getGroupLink(): GroupLink | null {
+  const chatId = getSetting(GROUP_CHAT_KEY);
+  if (!chatId) return null;
+  return {
+    chat_id: chatId,
+    topic_id: getSetting(GROUP_TOPIC_KEY),
+    chat_title: getSetting(GROUP_TITLE_KEY),
+    topic_name: getSetting(GROUP_TOPIC_NAME_KEY),
+  };
+}
+
+export function unlinkGroup(): void {
+  deleteSetting(GROUP_CHAT_KEY);
+  deleteSetting(GROUP_TOPIC_KEY);
+  deleteSetting(GROUP_TITLE_KEY);
+  deleteSetting(GROUP_TOPIC_NAME_KEY);
+  deleteSetting(GROUP_CAPTURE_KEY);
+}
+
+export function setGroupCaptureMode(on: boolean): void {
+  if (on) setSetting(GROUP_CAPTURE_KEY, '1');
+  else deleteSetting(GROUP_CAPTURE_KEY);
+}
+
+export function isGroupCapturing(): boolean {
+  return getSetting(GROUP_CAPTURE_KEY) === '1';
 }
 
 function setOffset(id: number): void {
@@ -119,7 +167,7 @@ function formatStep(step: EngineStep): string {
 let lastStepSentAt = 0;
 const MIN_STEP_INTERVAL_MS = 500;
 
-async function sendStep(step: EngineStep): Promise<void> {
+async function sendStep(step: EngineStep, target: SendTarget): Promise<void> {
   const msg = formatStep(step);
   if (!msg) return;
   // Throttle
@@ -127,7 +175,7 @@ async function sendStep(step: EngineStep): Promise<void> {
   const wait = MIN_STEP_INTERVAL_MS - (now - lastStepSentAt);
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   lastStepSentAt = Date.now();
-  const r = await sendTelegram(msg);
+  const r = await sendTelegram(msg, { target });
   if (!r.ok) console.error(`[tg-listener] step send failed: ${r.error}`);
 }
 
@@ -158,7 +206,7 @@ function stopActiveRun(): boolean {
  * Telegram. Does not block the caller — the poll loop stays free to receive
  * /stop and new messages.
  */
-function startEngineRun(prompt: string, sessionId: string | null): void {
+function startEngineRun(prompt: string, sessionId: string | null, target: SendTarget): void {
   // Auto-stop & replace: cancel whatever is already running.
   stopActiveRun();
 
@@ -173,12 +221,12 @@ function startEngineRun(prompt: string, sessionId: string | null): void {
     // sendStep is throttled.
     const onStep = async (step: EngineStep) => {
       logStep(step, sessionId);
-      await sendStep(step);
+      await sendStep(step, target);
     };
 
-    await sendChatAction('typing');
+    await sendChatAction('typing', target);
     const typing = setInterval(() => {
-      sendChatAction('typing').catch(() => {});
+      sendChatAction('typing', target).catch(() => {});
     }, 4000);
 
     let result: EngineResult;
@@ -191,11 +239,12 @@ function startEngineRun(prompt: string, sessionId: string | null): void {
       if (!result.ok && result.staleSession && sessionId && !abort.signal.aborted) {
         db.prepare('DELETE FROM settings WHERE key = ?').run(CLAUDE_SESSION_KEY);
         await sendTelegram(
-          '♻️ <b>Previous session expired</b> — starting a fresh conversation…'
+          '♻️ <b>Previous session expired</b> — starting a fresh conversation…',
+          { target }
         );
         const onFreshStep = async (step: EngineStep) => {
           logStep(step, null);
-          await sendStep(step);
+          await sendStep(step, target);
         };
         result = await engine.run(prompt, null, abort.signal, onFreshStep);
       }
@@ -204,7 +253,7 @@ function startEngineRun(prompt: string, sessionId: string | null): void {
       if (activeRun === run) activeRun = null;
     }
 
-    await deliverResult(result);
+    await deliverResult(result, target);
   })().catch((err) => {
     console.error('[tg-listener] engine run crashed:', err);
     if (activeRun === run) activeRun = null;
@@ -212,7 +261,7 @@ function startEngineRun(prompt: string, sessionId: string | null): void {
 }
 
 /** Send the engine's result (or error) back to Telegram and log it. */
-async function deliverResult(result: EngineResult): Promise<void> {
+async function deliverResult(result: EngineResult, target: SendTarget): Promise<void> {
   if (result.ok) {
     if (result.session_id) setSetting(CLAUDE_SESSION_KEY, result.session_id);
     // Claude asked a question. Headless mode auto-cancels it, so the result
@@ -221,7 +270,7 @@ async function deliverResult(result: EngineResult): Promise<void> {
     // which resumes the session via the normal message flow.
     if (result.questions && result.questions.length > 0) {
       const body = formatQuestions(result.questions);
-      const r = await sendTelegram(body);
+      const r = await sendTelegram(body, { target });
       logMessage({
         direction: 'out',
         text: body,
@@ -233,7 +282,7 @@ async function deliverResult(result: EngineResult): Promise<void> {
       return;
     }
     const body = result.text || `(${ENGINE_LABELS[getEngineId()]} returned an empty response)`;
-    const r = await sendTelegramPlain(body);
+    const r = await sendTelegramPlain(body, target);
     logMessage({
       direction: 'out',
       text: body,
@@ -255,7 +304,10 @@ async function deliverResult(result: EngineResult): Promise<void> {
   // Aborted runs were stopped on purpose; the /stop or replacement message
   // already acknowledged that, so don't surface a scary error.
   if (result.aborted) return;
-  await sendTelegram(`⚠️ <b>${escapeHtml(ENGINE_LABELS[getEngineId()])} error</b>\n${escapeHtml(result.error)}`);
+  await sendTelegram(
+    `⚠️ <b>${escapeHtml(ENGINE_LABELS[getEngineId()])} error</b>\n${escapeHtml(result.error)}`,
+    { target }
+  );
 }
 
 /** Render AskUserQuestion(s) as a text prompt the user can answer by typing. */
@@ -279,13 +331,14 @@ function formatQuestions(questions: AskQuestion[]): string {
 async function loop(): Promise<void> {
   while (listenerLoopRunning) {
     const { botToken, chatId } = getTelegramConfig();
-    const capturing = isCapturing();
+    const capturing = isCapturing() || isGroupCapturing();
 
     if (!botToken) {
       await sleep(5000);
       continue;
     }
-    // We poll if either we're capturing (onboarding) or relaying is enabled.
+    // We poll if either we're capturing (onboarding / group linking) or
+    // relaying is enabled.
     if (!capturing && (!isRelayEnabled() || !chatId)) {
       await sleep(3000);
       continue;
@@ -320,6 +373,39 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
   if (!msg) return;
 
   const incomingChatId = String(msg.chat.id);
+  const isGroupChat = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+  // Only trust message_thread_id when it's an actual forum topic — plain reply
+  // threads in supergroups also carry a thread id but aren't topics.
+  const topicThreadId =
+    msg.is_topic_message && msg.message_thread_id != null ? msg.message_thread_id : null;
+
+  // Group-topic capture: the first group message during capture mode wins.
+  if (isGroupCapturing() && isGroupChat) {
+    setSetting(GROUP_CHAT_KEY, incomingChatId);
+    if (topicThreadId != null) setSetting(GROUP_TOPIC_KEY, String(topicThreadId));
+    else deleteSetting(GROUP_TOPIC_KEY);
+    if (msg.chat.title) setSetting(GROUP_TITLE_KEY, msg.chat.title);
+    else deleteSetting(GROUP_TITLE_KEY);
+    // A topic message quotes the topic-created service message, which carries
+    // the topic's name — grab it for the dashboard when available.
+    const topicName = msg.reply_to_message?.forum_topic_created?.name;
+    if (topicName) setSetting(GROUP_TOPIC_NAME_KEY, topicName);
+    else deleteSetting(GROUP_TOPIC_NAME_KEY);
+    deleteSetting(GROUP_CAPTURE_KEY);
+    const label = ENGINE_LABELS[getEngineId()];
+    await sendTelegram(
+      [
+        '✅ <b>Group linked!</b>',
+        '',
+        `Chat ID: <code>${incomingChatId}</code>`,
+        topicThreadId != null ? `Topic ID: <code>${topicThreadId}</code>` : 'Topic: General (whole group)',
+        '',
+        `You can now talk to ${escapeHtml(label)} here — just say "Hi!"`,
+      ].join('\n'),
+      { target: { chatId: incomingChatId, threadId: topicThreadId } }
+    );
+    return;
+  }
 
   // Onboarding capture: the first message during capture mode wins.
   if (isCapturing()) {
@@ -344,15 +430,26 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
     return;
   }
 
-  if (!expectedChatId) return;
-  if (incomingChatId !== expectedChatId) {
+  // Authorization: the onboarded private chat, or the linked group topic.
+  const group = getGroupLink();
+  const fromPrivate = Boolean(expectedChatId && incomingChatId === expectedChatId);
+  const fromGroupTopic = Boolean(
+    group &&
+      incomingChatId === group.chat_id &&
+      (topicThreadId != null ? String(topicThreadId) : null) === group.topic_id
+  );
+  if (!fromPrivate && !fromGroupTopic) {
     console.log(`[tg-listener] ignored message from unauthorized chat ${incomingChatId}`);
     return;
   }
 
   if (!isRelayEnabled()) return;
 
-  const text = (msg.text ?? '').trim();
+  // Replies go back to where the message came from (inside the topic, if any).
+  const target: SendTarget = { chatId: incomingChatId, threadId: topicThreadId };
+
+  // In groups, commands arrive as e.g. "/stop@MyBot" — strip the mention.
+  const text = (msg.text ?? '').trim().replace(/^\/([a-z_]+)@\S+/i, '/$1');
   const caption = (msg.caption ?? '').trim();
   const hasPhoto = Array.isArray(msg.photo) && msg.photo.length > 0;
   const video = extractVideo(msg);
@@ -364,9 +461,9 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
 
   if (text === '/stop' || text.startsWith('/stop ')) {
     if (stopActiveRun()) {
-      await sendTelegram(`🛑 <b>Stopped.</b> ${escapeHtml(engineLabel)} was interrupted.`);
+      await sendTelegram(`🛑 <b>Stopped.</b> ${escapeHtml(engineLabel)} was interrupted.`, { target });
     } else {
-      await sendTelegram('💤 Nothing is running right now.');
+      await sendTelegram('💤 Nothing is running right now.', { target });
     }
     return;
   }
@@ -374,7 +471,8 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
   if (text === '/new_session' || text.startsWith('/new_session ')) {
     db.prepare('DELETE FROM settings WHERE key = ?').run(CLAUDE_SESSION_KEY);
     await sendTelegram(
-      `🔄 <b>New conversation started.</b>\nThe next message will begin a fresh ${escapeHtml(engineLabel)} session.`
+      `🔄 <b>New conversation started.</b>\nThe next message will begin a fresh ${escapeHtml(engineLabel)} session.`,
+      { target }
     );
     return;
   }
@@ -391,12 +489,13 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
           '  /engine codex — use Codex',
           '',
           '<i>Switching starts a fresh conversation.</i>',
-        ].join('\n')
+        ].join('\n'),
+        { target }
       );
       return;
     }
     if (!isEngineId(arg)) {
-      await sendTelegram(`⚠️ Unknown engine <code>${escapeHtml(arg)}</code>. Use <code>claude</code> or <code>codex</code>.`);
+      await sendTelegram(`⚠️ Unknown engine <code>${escapeHtml(arg)}</code>. Use <code>claude</code> or <code>codex</code>.`, { target });
       return;
     }
     // Stop any in-flight run and clear the session — sessions don't carry
@@ -405,7 +504,8 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
     db.prepare('DELETE FROM settings WHERE key = ?').run(CLAUDE_SESSION_KEY);
     setEngineId(arg);
     await sendTelegram(
-      `✅ <b>Engine switched to ${escapeHtml(ENGINE_LABELS[arg])}.</b>\nThe next message will begin a fresh conversation.`
+      `✅ <b>Engine switched to ${escapeHtml(ENGINE_LABELS[arg])}.</b>\nThe next message will begin a fresh conversation.`,
+      { target }
     );
     return;
   }
@@ -425,18 +525,19 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
         '  /new_session — start a fresh conversation',
         '  /engine — show or switch the active engine (Claude Code / Codex)',
         '  /help — show this message',
-      ].join('\n')
+      ].join('\n'),
+      { target }
     );
     return;
   }
 
   let prompt: string;
   if (video) {
-    prompt = await buildVideoPrompt(msg, video, caption || text);
+    prompt = await buildVideoPrompt(msg, video, caption || text, target);
   } else if (audio) {
-    prompt = await buildAudioPrompt(msg, audio, caption || text);
+    prompt = await buildAudioPrompt(msg, audio, caption || text, target);
   } else if (hasPhoto) {
-    prompt = await buildPhotoPrompt(msg, caption || text);
+    prompt = await buildPhotoPrompt(msg, caption || text, target);
   } else {
     prompt = text;
   }
@@ -448,7 +549,7 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
 
   // Auto-stop & replace: a fresh prompt cancels whatever is still running.
   if (activeRun) {
-    await sendTelegram('🛑 Stopping the previous task and starting the new one…');
+    await sendTelegram('🛑 Stopping the previous task and starting the new one…', { target });
   }
 
   console.log(
@@ -457,10 +558,14 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
 
   // Fire-and-forget: the run streams its own output and the poll loop stays
   // free to receive /stop and further messages.
-  startEngineRun(prompt, sessionId);
+  startEngineRun(prompt, sessionId, target);
 }
 
-async function buildPhotoPrompt(msg: TelegramMessage, userText: string): Promise<string> {
+async function buildPhotoPrompt(
+  msg: TelegramMessage,
+  userText: string,
+  target: SendTarget
+): Promise<string> {
   const photos = msg.photo ?? [];
   // Telegram returns photos sorted ascending by size; the largest is best for vision.
   const largest = photos[photos.length - 1];
@@ -470,7 +575,7 @@ async function buildPhotoPrompt(msg: TelegramMessage, userText: string): Promise
   const destPath = resolve(INCOMING_DIR, `${largest.file_unique_id}${ext}`);
   const dl = await downloadTelegramFile(largest.file_id, destPath);
   if (!dl.ok) {
-    await sendTelegram(`⚠️ <b>Failed to download photo</b>\n${escapeHtml(dl.error)}`);
+    await sendTelegram(`⚠️ <b>Failed to download photo</b>\n${escapeHtml(dl.error)}`, { target });
     return '';
   }
 
@@ -537,11 +642,13 @@ function extractVideo(msg: TelegramMessage): VideoAttachment | null {
 async function buildVideoPrompt(
   msg: TelegramMessage,
   video: VideoAttachment,
-  userText: string
+  userText: string,
+  target: SendTarget
 ): Promise<string> {
   if (video.size > TG_FILE_LIMIT) {
     await sendTelegram(
-      "🎥 <b>Video received, but it's too big.</b>\nTelegram bots can only download files up to 20 MB."
+      "🎥 <b>Video received, but it's too big.</b>\nTelegram bots can only download files up to 20 MB.",
+      { target }
     );
     return '';
   }
@@ -549,7 +656,7 @@ async function buildVideoPrompt(
   const destPath = join(INCOMING_DIR, `${video.file_unique_id}${video.hint_ext}`);
   const dl = await downloadTelegramFile(video.file_id, destPath);
   if (!dl.ok) {
-    await sendTelegram(`⚠️ <b>Failed to download video</b>\n${escapeHtml(dl.error)}`);
+    await sendTelegram(`⚠️ <b>Failed to download video</b>\n${escapeHtml(dl.error)}`, { target });
     return '';
   }
 
@@ -611,11 +718,13 @@ function extractAudio(msg: TelegramMessage): AudioAttachment | null {
 async function buildAudioPrompt(
   msg: TelegramMessage,
   audio: AudioAttachment,
-  userText: string
+  userText: string,
+  target: SendTarget
 ): Promise<string> {
   if (audio.size > TG_FILE_LIMIT) {
     await sendTelegram(
-      "🎙 <b>Audio received, but it's too big.</b>\nTelegram bots can only download files up to 20 MB."
+      "🎙 <b>Audio received, but it's too big.</b>\nTelegram bots can only download files up to 20 MB.",
+      { target }
     );
     return '';
   }
@@ -623,7 +732,7 @@ async function buildAudioPrompt(
   const destPath = join(INCOMING_DIR, `${audio.file_unique_id}${audio.hint_ext}`);
   const dl = await downloadTelegramFile(audio.file_id, destPath);
   if (!dl.ok) {
-    await sendTelegram(`⚠️ <b>Failed to download audio</b>\n${escapeHtml(dl.error)}`);
+    await sendTelegram(`⚠️ <b>Failed to download audio</b>\n${escapeHtml(dl.error)}`, { target });
     return '';
   }
 

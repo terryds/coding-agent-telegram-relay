@@ -98,6 +98,18 @@ export type TelegramMessage = {
   audio?: TelegramAudio;
   document?: TelegramDocument;
   chat: TelegramChat;
+  // Forum-topic messages: thread id of the topic + a flag distinguishing them
+  // from plain reply threads. Messages in a topic quote the topic-created
+  // service message, which carries the topic's name.
+  message_thread_id?: number;
+  is_topic_message?: boolean;
+  reply_to_message?: { forum_topic_created?: { name?: string } };
+};
+
+/** Where to send a message: a chat, optionally inside a forum topic. */
+export type SendTarget = {
+  chatId: string;
+  threadId?: number | null;
 };
 
 export type TelegramUpdate = {
@@ -166,17 +178,19 @@ export async function getRecentChats(token: string): Promise<Ok<{ chats: ChatInf
 
 export async function sendTelegram(
   text: string,
-  options: { html?: boolean } = {}
+  options: { html?: boolean; target?: SendTarget } = {}
 ): Promise<{ ok: boolean; error?: string }> {
   const { botToken, chatId } = getTelegramConfig();
-  if (!botToken || !chatId) return { ok: false, error: 'Telegram not configured' };
+  const target = options.target ?? (chatId ? { chatId } : null);
+  if (!botToken || !target) return { ok: false, error: 'Telegram not configured' };
   const html = options.html ?? true;
   try {
     const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: chatId,
+        chat_id: target.chatId,
+        ...(target.threadId ? { message_thread_id: target.threadId } : {}),
         text,
         ...(html ? { parse_mode: 'HTML' } : {}),
         disable_web_page_preview: true,
@@ -194,24 +208,32 @@ export async function sendTelegram(
 
 const MAX_TG_MESSAGE = 4000;
 
-export async function sendTelegramPlain(text: string): Promise<{ ok: boolean; error?: string }> {
-  if (text.length <= MAX_TG_MESSAGE) return sendTelegram(text, { html: false });
+export async function sendTelegramPlain(
+  text: string,
+  target?: SendTarget
+): Promise<{ ok: boolean; error?: string }> {
+  if (text.length <= MAX_TG_MESSAGE) return sendTelegram(text, { html: false, target });
   for (let i = 0; i < text.length; i += MAX_TG_MESSAGE) {
     const chunk = text.slice(i, i + MAX_TG_MESSAGE);
-    const r = await sendTelegram(chunk, { html: false });
+    const r = await sendTelegram(chunk, { html: false, target });
     if (!r.ok) return r;
   }
   return { ok: true };
 }
 
-export async function sendChatAction(action: string): Promise<void> {
+export async function sendChatAction(action: string, target?: SendTarget): Promise<void> {
   const { botToken, chatId } = getTelegramConfig();
-  if (!botToken || !chatId) return;
+  const dest = target ?? (chatId ? { chatId } : null);
+  if (!botToken || !dest) return;
   try {
     await fetch(`https://api.telegram.org/bot${botToken}/sendChatAction`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, action }),
+      body: JSON.stringify({
+        chat_id: dest.chatId,
+        ...(dest.threadId ? { message_thread_id: dest.threadId } : {}),
+        action,
+      }),
     });
   } catch {
     // non-critical

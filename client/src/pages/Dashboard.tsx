@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useLocation } from 'wouter';
-import { api, type EngineId, type FeedEvent, type Status } from '../api';
+import { api, type EngineId, type FeedEvent, type GroupLink, type Status } from '../api';
 import { AgentAuth } from '../components/AgentAuth';
 
 type Props = { status: Status; onChange: () => void };
@@ -209,6 +209,17 @@ export function Dashboard({ status, onChange }: Props) {
 
       <section>
         <h2 className="font-medium mb-3 text-sm uppercase tracking-wide text-zinc-400">
+          Group topic
+        </h2>
+        <GroupTopicCard
+          group={status.group}
+          botUsername={status.bot?.username ?? null}
+          onChange={onChange}
+        />
+      </section>
+
+      <section>
+        <h2 className="font-medium mb-3 text-sm uppercase tracking-wide text-zinc-400">
           {engineLabel} authentication
         </h2>
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-5">
@@ -235,6 +246,174 @@ export function Dashboard({ status, onChange }: Props) {
           </div>
         )}
       </section>
+    </div>
+  );
+}
+
+function GroupTopicCard({
+  group,
+  botUsername,
+  onChange,
+}: {
+  group: GroupLink | null;
+  botUsername: string | null;
+  onChange: () => void;
+}) {
+  const [capturing, setCapturing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pollRef = useRef<number | null>(null);
+
+  const startCapture = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      await api.groupStartCapture();
+      setCapturing(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancelCapture = async () => {
+    try {
+      await api.groupCancelCapture();
+    } catch {
+      // ignore
+    }
+    setCapturing(false);
+  };
+
+  const unlink = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      await api.groupUnlink();
+      onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // While listening, poll until the server reports the capture finished.
+  useEffect(() => {
+    if (!capturing) return;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const r = await api.groupStatus();
+        if (!r.capturing) {
+          setCapturing(false);
+          onChange();
+          return;
+        }
+      } catch {
+        // keep polling
+      }
+      if (!stopped) pollRef.current = window.setTimeout(tick, 1500);
+    };
+    tick();
+    return () => {
+      stopped = true;
+      if (pollRef.current) window.clearTimeout(pollRef.current);
+    };
+  }, [capturing]);
+
+  const bot = botUsername ? `@${botUsername}` : 'your bot';
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-5 text-sm space-y-3">
+      {group ? (
+        <div className="space-y-1">
+          <p className="text-emerald-400">
+            Linked to <span className="font-medium">{group.chat_title ?? group.chat_id}</span>
+            {' · '}
+            {group.topic_id ? (
+              <>topic {group.topic_name ? <span className="font-medium">{group.topic_name}</span> : <code>{group.topic_id}</code>}</>
+            ) : (
+              'whole group (no topic)'
+            )}
+          </p>
+          <p className="text-zinc-500 text-xs">
+            Chat ID: <code className="text-zinc-400">{group.chat_id}</code>
+            {group.topic_id && (
+              <>
+                {' '}· Topic ID: <code className="text-zinc-400">{group.topic_id}</code>
+              </>
+            )}
+          </p>
+          <p className="text-zinc-400 text-xs">
+            The relay only reacts to messages in this exact topic — other topics and
+            groups are ignored. Your private chat keeps working as usual.
+          </p>
+        </div>
+      ) : (
+        <p className="text-zinc-400">
+          Optionally link one group topic — the relay will answer there in addition
+          to your private chat, and only in that exact topic.
+        </p>
+      )}
+
+      {capturing ? (
+        <div className="space-y-3">
+          <ol className="list-decimal list-inside text-zinc-300 space-y-1">
+            <li>
+              Add <span className="font-mono">{bot}</span> to your group (if it isn't already).
+            </li>
+            <li>
+              Make sure the bot can see messages: either disable privacy mode via{' '}
+              <a
+                className="underline text-zinc-100"
+                href="https://t.me/BotFather"
+                target="_blank"
+                rel="noreferrer"
+              >
+                @BotFather
+              </a>{' '}
+              (<span className="font-mono">/setprivacy</span> → Disable) or make the bot a
+              group admin.
+            </li>
+            <li>Send any message in the topic you want to link.</li>
+          </ol>
+          <div className="flex items-center gap-3">
+            <span className="inline-flex items-center gap-2 text-zinc-400">
+              <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+              Waiting for a message in the group…
+            </span>
+            <button
+              onClick={cancelCapture}
+              className="text-zinc-400 hover:text-zinc-200 underline"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-2">
+          <button
+            onClick={startCapture}
+            disabled={busy}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm font-medium"
+          >
+            {group ? 'Re-link (listen again)' : 'Link a group topic'}
+          </button>
+          {group && (
+            <button
+              onClick={unlink}
+              disabled={busy}
+              className="px-4 py-2 border border-red-900/60 bg-red-950/20 hover:bg-red-950/40 text-red-200 rounded text-sm font-medium disabled:opacity-50"
+            >
+              Unlink
+            </button>
+          )}
+        </div>
+      )}
+
+      {error && <p className="text-red-400">{error}</p>}
     </div>
   );
 }

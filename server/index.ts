@@ -27,6 +27,10 @@ import {
   setRelayEnabled,
   setCaptureMode,
   getCapturedChatId,
+  getGroupLink,
+  unlinkGroup,
+  setGroupCaptureMode,
+  isGroupCapturing,
   applyBotCommands,
   skipBacklog,
 } from './tg-listener.ts';
@@ -91,6 +95,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
       chat_id: cfg.chatId,
       bot,
       relay_enabled: isRelayEnabled(),
+      group: getGroupLink(),
       engine: getEngineId(),
       engines: ENGINE_IDS.map((id) => ({ id, label: ENGINE_LABELS[id] })),
       auth: getAuthConfig(getEngineId()),
@@ -227,6 +232,31 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     return json({ ok: true });
   }
 
+  // Group-topic link: same capture flow as onboarding, but for a group chat
+  // (optionally a forum topic inside it). The existing link stays active until
+  // a new capture succeeds; the client polls /group/status and treats
+  // capturing=false + group!=null as "done".
+  if (p === '/group/start-capture' && m === 'POST') {
+    if (!getSetting('telegram_bot_token')) return err(400, 'Save a bot token first');
+    await skipBacklog();
+    setGroupCaptureMode(true);
+    return json({ ok: true });
+  }
+
+  if (p === '/group/status' && m === 'GET') {
+    return json({ capturing: isGroupCapturing(), group: getGroupLink() });
+  }
+
+  if (p === '/group/cancel-capture' && m === 'POST') {
+    setGroupCaptureMode(false);
+    return json({ ok: true });
+  }
+
+  if (p === '/group/unlink' && m === 'POST') {
+    unlinkGroup();
+    return json({ ok: true });
+  }
+
   if (p === '/relay' && m === 'POST') {
     const body = await readBody<{ enabled?: boolean }>(req);
     const enabled = Boolean(body.enabled);
@@ -269,6 +299,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     deleteSetting('claude_session_id');
     deleteSetting('captured_chat_id');
     deleteSetting('capture_chat_id');
+    unlinkGroup();
     return json({ ok: true });
   }
 

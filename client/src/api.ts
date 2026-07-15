@@ -27,12 +27,20 @@ export type EngineAuth = {
   error?: string;
 };
 
+export type GroupLink = {
+  chat_id: string;
+  topic_id: string | null; // null = plain group / the General topic
+  chat_title: string | null;
+  topic_name: string | null;
+};
+
 export type Status = {
   onboarded: boolean;
   bot_token_set: boolean;
   chat_id: string | null;
   bot: BotInfo | null;
   relay_enabled: boolean;
+  group: GroupLink | null;
   engine: EngineId;
   engines: EngineInfo[];
   auth: AuthConfig;
@@ -131,6 +139,13 @@ export const api = {
   cancelCapture: () =>
     request<{ ok: true }>('/onboarding/cancel-capture', { method: 'POST' }),
   captured: () => request<{ chat_id: string | null }>('/onboarding/captured'),
+  groupStartCapture: () =>
+    request<{ ok: true }>('/group/start-capture', { method: 'POST' }),
+  groupCancelCapture: () =>
+    request<{ ok: true }>('/group/cancel-capture', { method: 'POST' }),
+  groupStatus: () =>
+    request<{ capturing: boolean; group: GroupLink | null }>('/group/status'),
+  groupUnlink: () => request<{ ok: true }>('/group/unlink', { method: 'POST' }),
   setRelay: (enabled: boolean) =>
     request<{ ok: true; enabled: boolean }>('/relay', {
       method: 'POST',
