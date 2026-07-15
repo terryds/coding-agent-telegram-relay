@@ -8,6 +8,7 @@ A tiny relay that forwards Telegram messages to a coding agent — [Claude Code]
 - **No vendor SDK** — spawns your local `claude` / `codex` CLI (inherits its auth)
 - **Session continuity** — `claude --resume` / `codex exec resume` keep the conversation across messages
 - **Guided onboarding** UI: choose engine + detect its CLI, paste bot token, capture your chat ID
+- **Group topics** — optionally link one group forum topic (or a whole group) from the dashboard; the bot answers there in addition to your private chat
 
 > Codex is driven via `codex exec --json` (one process per message, resumed by thread id) — the same one-shot-plus-resume model the relay already uses for Claude. It runs with `--dangerously-bypass-approvals-and-sandbox` to match Claude's `bypassPermissions`, so it works unattended. Keep the host's `codex` current — older CLIs may reject newer default models.
 
@@ -38,7 +39,39 @@ You'll be sent to `/onboarding`:
 2. Paste your bot token. The server validates it via `getMe` and shows `@your_bot`.
 3. Click **Start listening**, then open Telegram and message your bot. The first incoming message captures your chat ID and links it. The bot replies "✅ Chat linked".
 
-After that you're on the dashboard, where you can switch engine, manage agent authentication, toggle the relay, reset the agent session, view recent messages, or reset everything.
+After that you're on the dashboard, where you can switch engine, manage agent authentication, toggle the relay, link a group topic, reset the agent session, view recent messages, or reset everything.
+
+## Linking a group topic
+
+Besides your private chat, the relay can be bound to **one group** — either a
+specific forum topic inside it (default) or the entire group. Both share the
+same agent session, and replies go back to wherever the message came from (into
+the topic, using `message_thread_id`).
+
+From the dashboard's **Group topic** card:
+
+1. Pick the link scope: **Specific topic** (default) or **Entire group**.
+2. Click **Start listening**.
+3. Add the bot to your group, and make sure it can see messages — by default
+   bots in groups receive nothing. Either disable privacy mode via
+   [@BotFather](https://t.me/BotFather) (`/setprivacy` → Disable) or make the
+   bot a group admin.
+4. Send any message in the target topic (or anywhere in the group, for
+   whole-group links). The relay captures the chat ID + topic ID and replies
+   "✅ Group linked!".
+
+In topic scope, messages outside a topic don't complete the link — the bot
+replies with a hint and keeps waiting, so you can create the group/topic *after*
+you start listening. Once linked:
+
+- **Specific topic** — the bot only reacts to messages in that exact topic;
+  other topics, General, and other groups are ignored.
+- **Entire group** — the bot reacts to every message in the group (including
+  all topics, replying in-thread).
+
+Re-link replaces the existing link (it stays active until a new capture
+succeeds); Unlink removes it. Group commands work with the usual
+`/command@YourBot` form.
 
 ## Authentication
 
@@ -251,8 +284,9 @@ setsid nohup ~/coding-agent-telegram-relay/bin/safe-update-relay >/dev/null 2>&1
 ## Bot commands
 
 - `/start`, `/help` — show usage
-- `/stop` — interrupt Claude while it's working (kills the in-flight run)
-- `/new_session` — start a fresh Claude conversation (forgets prior context)
+- `/stop` — interrupt the agent while it's working (kills the in-flight run)
+- `/new_session` — start a fresh conversation (forgets prior context)
+- `/engine` — show or switch the active engine (`/engine claude` / `/engine codex`)
 
 ### Interrupting a run
 
@@ -275,7 +309,7 @@ Videos, round video notes, animations, and `video/*` documents work just like ph
 
 Everything is stored in `data/app.db` (SQLite). Two tables:
 
-- `settings` — key/value store (bot token, chat ID, session ID, relay enabled flag)
+- `settings` — key/value store (bot token, chat ID, group link, session ID, relay enabled flag)
 - `message_log` — recent in/out messages shown on the dashboard
 
 Photos sent via Telegram land in `data/incoming/` (also gitignored). To wipe state, stop the process, delete `data/app.db*` and `data/incoming/`, and restart — or use **Reset everything** in the dashboard.
@@ -289,7 +323,12 @@ Read this before deploying. The threat model is non-trivial.
 Claude is spawned with `--permission-mode bypassPermissions`, which means **every message that the relay accepts becomes a shell-capable prompt running as your VPS user**. There is no sandbox. The only thing keeping strangers out is:
 
 1. They don't have your bot token, and
-2. Their Telegram chat ID doesn't match the one captured during onboarding.
+2. Their message doesn't come from an authorized source: the chat ID captured
+   during onboarding, or the linked group topic (if you linked one).
+
+Note that a linked group widens the trust boundary: **everyone in that group
+(or topic) can drive the agent**. Only link groups where you trust every
+member — each of their messages is a shell-capable prompt on your VPS.
 
 If either of those falls over, the attacker has shell.
 
@@ -328,5 +367,5 @@ If you find a security issue, please open a private security advisory on GitHub 
 
 ## Notes
 
-- The relay is single-tenant: only the chat ID captured during onboarding can talk to Claude. Other senders are ignored.
+- The relay is single-tenant: only the chat ID captured during onboarding (plus the linked group topic, if any) can talk to the agent. Other senders are ignored.
 - The bot polls Telegram with long-polling (`getUpdates`, 25s timeout). No webhook setup needed.
