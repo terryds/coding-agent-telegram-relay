@@ -31,7 +31,27 @@ mkdirSync(INCOMING_DIR, { recursive: true });
 const TG_FILE_LIMIT = 20 * 1024 * 1024;
 
 const TG_OFFSET_KEY = 'telegram_update_offset';
+// Sessions are per source: the private chat uses the bare key (back-compat
+// with existing installs), the linked group gets one session per (chat, topic)
+// so group and private conversations don't bleed into each other.
+//
+// Despite the legacy "claude" name, the key stores the ACTIVE engine's resume
+// id — a Claude session id or a Codex thread id. That's safe because switching
+// engines clears every session (ids never cross engines).
 const CLAUDE_SESSION_KEY = 'claude_session_id';
+
+function groupSessionKey(chatId: string, topicThreadId: number | null): string {
+  return `${CLAUDE_SESSION_KEY}:group:${chatId}:${topicThreadId ?? 'general'}`;
+}
+
+/** Clear every conversation (private + all group topics). Used when the
+ *  engine switches — sessions don't carry across engines. */
+export function clearAllSessions(): void {
+  db.prepare('DELETE FROM settings WHERE key = ? OR key LIKE ?').run(
+    CLAUDE_SESSION_KEY,
+    `${CLAUDE_SESSION_KEY}:%`
+  );
+}
 const ENABLED_KEY = 'relay_enabled';
 const CAPTURE_KEY = 'capture_chat_id';
 const CAPTURED_KEY = 'captured_chat_id';
@@ -97,6 +117,8 @@ export function unlinkGroup(): void {
   deleteSetting(GROUP_TITLE_KEY);
   deleteSetting(GROUP_TOPIC_NAME_KEY);
   deleteSetting(GROUP_CAPTURE_KEY);
+  // Orphaned group conversations are useless once unlinked.
+  db.prepare('DELETE FROM settings WHERE key LIKE ?').run(`${CLAUDE_SESSION_KEY}:group:%`);
 }
 
 /** What the user chose to link: a specific forum topic, or the whole group. */
@@ -212,24 +234,36 @@ async function sendStep(step: EngineStep, target: SendTarget): Promise<void> {
 
 // ── Active run tracking ─────────────────────────────────────────────
 //
-// The poll loop must keep receiving updates while Claude works, so a run
+// The poll loop must keep receiving updates while the agent works, so a run
 // executes in the background (not awaited by the loop) and registers itself
-// here. A `/stop` command — or a new prompt (auto-stop & replace) — aborts it.
+// here. Runs are tracked per conversation (same key as the session), so the
+// group topic and the private chat can work concurrently. Within one
+// conversation, a `/stop` command — or a new prompt (auto-stop & replace) —
+// aborts that conversation's run only.
 
 type ActiveRun = { abort: AbortController };
-let activeRun: ActiveRun | null = null;
+const activeRuns = new Map<string, ActiveRun>();
 
 /**
- * Abort the current run, if any. The engine owns its own stream cleanup and
- * tears it down synchronously off the abort signal, so a replacement run can't
- * overlap with it. Returns true if a run was actually stopped.
+ * Abort one conversation's run, if any. The engine owns its own stream cleanup
+ * and tears it down synchronously off the abort signal, so a replacement run
+ * can't overlap with it. Returns true if a run was actually stopped.
  */
-function stopActiveRun(): boolean {
-  const run = activeRun;
+function stopRun(sessionKey: string): boolean {
+  const run = activeRuns.get(sessionKey);
   if (!run) return false;
-  activeRun = null; // claim it so the run's own cleanup won't double-clear
+  activeRuns.delete(sessionKey); // claim it so the run's own cleanup won't double-clear
   run.abort.abort();
   return true;
+}
+
+/** Abort every conversation's run (engine switch). Returns how many stopped. */
+export function stopAllRuns(): number {
+  let n = 0;
+  for (const key of Array.from(activeRuns.keys())) {
+    if (stopRun(key)) n++;
+  }
+  return n;
 }
 
 /**
@@ -237,13 +271,18 @@ function stopActiveRun(): boolean {
  * Telegram. Does not block the caller — the poll loop stays free to receive
  * /stop and new messages.
  */
-function startEngineRun(prompt: string, sessionId: string | null, target: SendTarget): void {
-  // Auto-stop & replace: cancel whatever is already running.
-  stopActiveRun();
+function startEngineRun(
+  prompt: string,
+  sessionId: string | null,
+  target: SendTarget,
+  sessionKey: string
+): void {
+  // Auto-stop & replace: cancel whatever this conversation is already running.
+  stopRun(sessionKey);
 
   const abort = new AbortController();
   const run: ActiveRun = { abort };
-  activeRun = run;
+  activeRuns.set(sessionKey, run);
 
   void (async () => {
     const engine = currentEngine();
@@ -268,7 +307,7 @@ function startEngineRun(prompt: string, sessionId: string | null, target: SendTa
       // renamed, or ~/.claude was cleaned). Drop it and transparently restart
       // as a fresh conversation rather than erroring at the user.
       if (!result.ok && result.staleSession && sessionId && !abort.signal.aborted) {
-        db.prepare('DELETE FROM settings WHERE key = ?').run(CLAUDE_SESSION_KEY);
+        deleteSetting(sessionKey);
         await sendTelegram(
           '♻️ <b>Previous session expired</b> — starting a fresh conversation…',
           { target }
@@ -281,20 +320,24 @@ function startEngineRun(prompt: string, sessionId: string | null, target: SendTa
       }
     } finally {
       clearInterval(typing);
-      if (activeRun === run) activeRun = null;
+      if (activeRuns.get(sessionKey) === run) activeRuns.delete(sessionKey);
     }
 
-    await deliverResult(result, target);
+    await deliverResult(result, target, sessionKey);
   })().catch((err) => {
     console.error('[tg-listener] engine run crashed:', err);
-    if (activeRun === run) activeRun = null;
+    if (activeRuns.get(sessionKey) === run) activeRuns.delete(sessionKey);
   });
 }
 
 /** Send the engine's result (or error) back to Telegram and log it. */
-async function deliverResult(result: EngineResult, target: SendTarget): Promise<void> {
+async function deliverResult(
+  result: EngineResult,
+  target: SendTarget,
+  sessionKey: string
+): Promise<void> {
   if (result.ok) {
-    if (result.session_id) setSetting(CLAUDE_SESSION_KEY, result.session_id);
+    if (result.session_id) setSetting(sessionKey, result.session_id);
     // Claude asked a question. Headless mode auto-cancels it, so the result
     // text is just a "question canceled" notice — suppress that and instead
     // show the question + options as text. The user answers by typing back,
@@ -492,8 +535,12 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
 
   if (!isRelayEnabled()) return;
 
-  // Replies go back to where the message came from (inside the topic, if any).
+  // Replies go back to where the message came from (inside the topic, if any),
+  // and each source carries its own conversation.
   const target: SendTarget = { chatId: incomingChatId, threadId: topicThreadId };
+  const sessionKey = fromGroupTopic
+    ? groupSessionKey(incomingChatId, topicThreadId)
+    : CLAUDE_SESSION_KEY;
 
   // In groups, commands arrive as e.g. "/stop@MyBot" — strip the mention.
   const text = (msg.text ?? '').trim().replace(/^\/([a-z_]+)@\S+/i, '/$1');
@@ -507,18 +554,21 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
   const engineLabel = ENGINE_LABELS[getEngineId()];
 
   if (text === '/stop' || text.startsWith('/stop ')) {
-    if (stopActiveRun()) {
+    // Scoped like /new_session: only this conversation's run is stopped.
+    if (stopRun(sessionKey)) {
       await sendTelegram(`🛑 <b>Stopped.</b> ${escapeHtml(engineLabel)} was interrupted.`, { target });
     } else {
-      await sendTelegram('💤 Nothing is running right now.', { target });
+      await sendTelegram('💤 Nothing is running in this conversation.', { target });
     }
     return;
   }
 
   if (text === '/new_session' || text.startsWith('/new_session ')) {
-    db.prepare('DELETE FROM settings WHERE key = ?').run(CLAUDE_SESSION_KEY);
+    // Scoped to where the command was sent — the other conversations keep
+    // their context.
+    deleteSetting(sessionKey);
     await sendTelegram(
-      `🔄 <b>New conversation started.</b>\nThe next message will begin a fresh ${escapeHtml(engineLabel)} session.`,
+      `🔄 <b>New conversation started here.</b>\nThe next message will begin a fresh ${escapeHtml(engineLabel)} session.`,
       { target }
     );
     return;
@@ -545,10 +595,10 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
       await sendTelegram(`⚠️ Unknown engine <code>${escapeHtml(arg)}</code>. Use <code>claude</code> or <code>codex</code>.`, { target });
       return;
     }
-    // Stop any in-flight run and clear the session — sessions don't carry
+    // Stop every in-flight run and clear every session — sessions don't carry
     // across engines.
-    stopActiveRun();
-    db.prepare('DELETE FROM settings WHERE key = ?').run(CLAUDE_SESSION_KEY);
+    stopAllRuns();
+    clearAllSessions();
     setEngineId(arg);
     await sendTelegram(
       `✅ <b>Engine switched to ${escapeHtml(ENGINE_LABELS[arg])}.</b>\nThe next message will begin a fresh conversation.`,
@@ -590,12 +640,28 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
   }
   if (!prompt) return;
 
-  logMessage({ direction: 'in', text: prompt, session_id: getSetting(CLAUDE_SESSION_KEY) });
+  // Let the agent know which room it's talking in (group messages only — the
+  // private chat is the default and needs no tag).
+  if (fromGroupTopic && group) {
+    const title = msg.chat.title ?? group.chat_title ?? incomingChatId;
+    const topicPart =
+      topicThreadId != null
+        ? `, topic ${
+            group.topic_name && String(topicThreadId) === group.topic_id
+              ? `"${group.topic_name}"`
+              : topicThreadId
+          }`
+        : '';
+    prompt = `(This message comes from the Telegram group "${title}"${topicPart} — your reply goes back there.)\n\n${prompt}`;
+  }
 
-  const sessionId = getSetting(CLAUDE_SESSION_KEY);
+  const sessionId = getSetting(sessionKey);
 
-  // Auto-stop & replace: a fresh prompt cancels whatever is still running.
-  if (activeRun) {
+  logMessage({ direction: 'in', text: prompt, session_id: sessionId });
+
+  // Auto-stop & replace: a fresh prompt cancels whatever THIS conversation is
+  // still running (other conversations' runs are unaffected).
+  if (activeRuns.has(sessionKey)) {
     await sendTelegram('🛑 Stopping the previous task and starting the new one…', { target });
   }
 
@@ -605,7 +671,7 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
 
   // Fire-and-forget: the run streams its own output and the poll loop stays
   // free to receive /stop and further messages.
-  startEngineRun(prompt, sessionId, target);
+  startEngineRun(prompt, sessionId, target, sessionKey);
 }
 
 async function buildPhotoPrompt(

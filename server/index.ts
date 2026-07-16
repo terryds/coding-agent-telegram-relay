@@ -35,6 +35,8 @@ import {
   setGroupCaptureMode,
   getGroupCaptureMode,
   isGroupCapturing,
+  clearAllSessions,
+  stopAllRuns,
   applyBotCommands,
   skipBacklog,
 } from './tg-listener.ts';
@@ -211,9 +213,11 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     const body = await readBody<{ engine?: string }>(req);
     const id = (body.engine || '').trim();
     if (!isEngineId(id)) return err(400, 'engine must be "claude" or "codex"');
+    // Sessions don't carry across engines; stop in-flight runs and clear so
+    // the next message is fresh.
+    stopAllRuns();
+    clearAllSessions();
     setEngineId(id);
-    // Sessions don't carry across engines; clear so the next message is fresh.
-    deleteSetting('claude_session_id');
     return json({ ok: true, engine: id });
   }
 
@@ -291,7 +295,8 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   }
 
   if (p === '/reset-session' && m === 'POST') {
-    deleteSetting('claude_session_id');
+    stopAllRuns();
+    clearAllSessions();
     return json({ ok: true });
   }
 
@@ -314,10 +319,11 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   }
 
   if (p === '/reset' && m === 'POST') {
+    stopAllRuns();
     setRelayEnabled(false);
     deleteSetting('telegram_bot_token');
     deleteSetting('telegram_chat_id');
-    deleteSetting('claude_session_id');
+    clearAllSessions();
     deleteSetting('captured_chat_id');
     deleteSetting('capture_chat_id');
     unlinkGroup();

@@ -198,7 +198,7 @@ export function Dashboard({ status, onChange }: Props) {
         >
           <div className="font-medium text-sm">Reset {engineLabel} session</div>
           <div className="text-xs text-zinc-400 mt-1">
-            Next message starts a fresh conversation.
+            Clears every conversation (private chat and group topic alike).
           </div>
         </button>
 

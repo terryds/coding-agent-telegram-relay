@@ -44,9 +44,21 @@ After that you're on the dashboard, where you can switch engine, manage agent au
 ## Linking a group topic
 
 Besides your private chat, the relay can be bound to **one group** — either a
-specific forum topic inside it (default) or the entire group. Both share the
-same agent session, and replies go back to wherever the message came from (into
-the topic, using `message_thread_id`).
+specific forum topic inside it (default) or the entire group. Replies go back
+to wherever the message came from (into the topic, using `message_thread_id`).
+
+Each source is its **own conversation**: the private chat and each group topic
+keep separate agent sessions, so contexts don't bleed into each other.
+`/new_session` and `/stop` only affect the conversation of the chat where you
+send them; switching engines or the dashboard's **Reset session** clears/stops
+them all. Group messages are prefixed with a short note telling the agent which
+group/topic it's replying in.
+
+Conversations also run **concurrently**: the group topic can be working on a
+task while you ask something else in the private chat. Within one conversation
+it's still one task at a time (a new message auto-stops that conversation's
+current run). Careful with two agents editing the same project simultaneously —
+the relay doesn't referee file conflicts.
 
 From the dashboard's **Group topic** card:
 
@@ -290,10 +302,10 @@ setsid nohup ~/coding-agent-telegram-relay/bin/safe-update-relay >/dev/null 2>&1
 
 ### Interrupting a run
 
-Claude streams its progress (thinking, tool calls, results) back to the chat as it works, and the listener keeps receiving messages the whole time. To interrupt:
+The agent streams its progress (thinking, tool calls, results) back to the chat as it works, and the listener keeps receiving messages the whole time. To interrupt:
 
-- Send `/stop` to cancel the current run and leave things idle.
-- Send a new prompt while Claude is still working — it auto-stops the running task and starts the new one (auto-stop & replace).
+- Send `/stop` to cancel the current run of *that conversation* and leave things idle (a run started from the group topic keeps going).
+- Send a new prompt while the agent is still working — it auto-stops that conversation's running task and starts the new one (auto-stop & replace).
 
 Stopping is a hard process kill: any file edits Claude already made stay on disk, only the in-flight turn is cut. The interrupted turn isn't saved to the session, so the next message resumes from the last *completed* turn.
 
