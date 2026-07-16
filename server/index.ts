@@ -30,8 +30,9 @@ import {
   setRelayEnabled,
   setCaptureMode,
   getCapturedChatId,
-  getGroupLink,
+  listGroupLinks,
   unlinkGroup,
+  unlinkAllGroups,
   setGroupCaptureMode,
   getGroupCaptureMode,
   isGroupCapturing,
@@ -101,7 +102,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
       chat_id: cfg.chatId,
       bot,
       relay_enabled: isRelayEnabled(),
-      group: getGroupLink(),
+      groups: listGroupLinks(),
       engine: getEngineId(),
       engines: ENGINE_IDS.map((id) => ({ id, label: ENGINE_LABELS[id] })),
       auth: { ...getAuthConfig(getEngineId()), last: getLastAuthProbe(getEngineId()) },
@@ -249,10 +250,10 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     return json({ ok: true });
   }
 
-  // Group-topic link: same capture flow as onboarding, but for a group chat
-  // (optionally a forum topic inside it). The existing link stays active until
-  // a new capture succeeds; the client polls /group/status and treats
-  // capturing=false + group!=null as "done".
+  // Group-topic links: same capture flow as onboarding, but for group chats
+  // (optionally a forum topic inside one), added one at a time. Existing links
+  // stay active while capturing; the client polls /group/status and treats
+  // capturing flipping to false as "done".
   if (p === '/group/start-capture' && m === 'POST') {
     if (!getSetting('telegram_bot_token')) return err(400, 'Save a bot token first');
     const body = await readBody<{ mode?: string }>(req);
@@ -268,7 +269,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     return json({
       capturing: isGroupCapturing(),
       mode: getGroupCaptureMode(),
-      group: getGroupLink(),
+      groups: listGroupLinks(),
     });
   }
 
@@ -278,7 +279,9 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   }
 
   if (p === '/group/unlink' && m === 'POST') {
-    unlinkGroup();
+    const body = await readBody<{ id?: number }>(req);
+    if (typeof body.id !== 'number') return err(400, 'Link id required');
+    if (!unlinkGroup(body.id)) return err(404, 'No such link');
     return json({ ok: true });
   }
 
@@ -326,7 +329,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     clearAllSessions();
     deleteSetting('captured_chat_id');
     deleteSetting('capture_chat_id');
-    unlinkGroup();
+    unlinkAllGroups();
     return json({ ok: true });
   }
 

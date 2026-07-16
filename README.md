@@ -8,7 +8,7 @@ A tiny relay that forwards Telegram messages to a coding agent — [Claude Code]
 - **No vendor SDK** — spawns your local `claude` / `codex` CLI (inherits its auth)
 - **Session continuity** — `claude --resume` / `codex exec resume` keep the conversation across messages
 - **Guided onboarding** UI: choose engine + detect its CLI, paste bot token, capture your chat ID
-- **Group topics** — optionally link one group forum topic (or a whole group) from the dashboard; the bot answers there in addition to your private chat
+- **Group topics** — link any number of group forum topics (or whole groups) from the dashboard; the bot answers there in addition to your private chat, each with its own conversation
 
 > Codex is driven via `codex exec --json` (one process per message, resumed by thread id) — the same one-shot-plus-resume model the relay already uses for Claude. It runs with `--dangerously-bypass-approvals-and-sandbox` to match Claude's `bypassPermissions`, so it works unattended. Keep the host's `codex` current — older CLIs may reject newer default models.
 
@@ -41,11 +41,12 @@ You'll be sent to `/onboarding`:
 
 After that you're on the dashboard, where you can switch engine, manage agent authentication, toggle the relay, link a group topic, reset the agent session, view recent messages, or reset everything.
 
-## Linking a group topic
+## Linking group topics
 
-Besides your private chat, the relay can be bound to **one group** — either a
-specific forum topic inside it (default) or the entire group. Replies go back
-to wherever the message came from (into the topic, using `message_thread_id`).
+Besides your private chat, the relay can be bound to **any number of groups**,
+added one at a time — each either a specific forum topic (default) or an entire
+group. Replies go back to wherever the message came from (into the topic, using
+`message_thread_id`).
 
 Each source is its **own conversation**: the private chat and each group topic
 keep separate agent sessions, so contexts don't bleed into each other.
@@ -60,10 +61,10 @@ it's still one task at a time (a new message auto-stops that conversation's
 current run). Careful with two agents editing the same project simultaneously —
 the relay doesn't referee file conflicts.
 
-From the dashboard's **Group topic** card:
+From the dashboard's **Group topics** card:
 
 1. Pick the link scope: **Specific topic** (default) or **Entire group**.
-2. Click **Start listening**.
+2. Click **Add a group topic**.
 3. Add the bot to your group, and make sure it can see messages — by default
    bots in groups receive nothing. Either disable privacy mode via
    [@BotFather](https://t.me/BotFather) (`/setprivacy` → Disable) or make the
@@ -81,9 +82,10 @@ you start listening. Once linked:
 - **Entire group** — the bot reacts to every message in the group (including
   all topics, replying in-thread).
 
-Re-link replaces the existing link (it stays active until a new capture
-succeeds); Unlink removes it. Group commands work with the usual
-`/command@YourBot` form.
+Every link shows as a row on the card with its own **Unlink** button; unlinking
+removes that link's conversation(s) and leaves everything else untouched.
+Capturing a chat+topic that's already linked just refreshes its name instead of
+duplicating it. Group commands work with the usual `/command@YourBot` form.
 
 ## Authentication
 

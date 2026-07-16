@@ -216,10 +216,10 @@ export function Dashboard({ status, onChange }: Props) {
 
       <section>
         <h2 className="font-medium mb-3 text-sm uppercase tracking-wide text-zinc-400">
-          Group topic
+          Group topics
         </h2>
         <GroupTopicCard
-          group={status.group}
+          groups={status.groups}
           botUsername={status.bot?.username ?? null}
           onChange={onChange}
         />
@@ -258,17 +258,18 @@ export function Dashboard({ status, onChange }: Props) {
 }
 
 function GroupTopicCard({
-  group,
+  groups,
   botUsername,
   onChange,
 }: {
-  group: GroupLink | null;
+  groups: GroupLink[];
   botUsername: string | null;
   onChange: () => void;
 }) {
   const [capturing, setCapturing] = useState(false);
   const [mode, setMode] = useState<GroupCaptureMode>('topic');
   const [busy, setBusy] = useState(false);
+  const [unlinking, setUnlinking] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
@@ -294,16 +295,16 @@ function GroupTopicCard({
     setCapturing(false);
   };
 
-  const unlink = async () => {
+  const unlink = async (id: number) => {
     setError(null);
-    setBusy(true);
+    setUnlinking(id);
     try {
-      await api.groupUnlink();
+      await api.groupUnlink(id);
       onChange();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      setUnlinking(null);
     }
   };
 
@@ -335,36 +336,51 @@ function GroupTopicCard({
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-5 text-sm space-y-3">
-      {group ? (
-        <div className="space-y-1">
-          <p className="text-emerald-400">
-            Linked to <span className="font-medium">{group.chat_title ?? group.chat_id}</span>
-            {' · '}
-            {group.topic_id ? (
-              <>topic {group.topic_name ? <span className="font-medium">{group.topic_name}</span> : <code>{group.topic_id}</code>}</>
-            ) : (
-              'entire group'
-            )}
-          </p>
+      {groups.length > 0 ? (
+        <div className="space-y-2">
+          {groups.map((g) => (
+            <div
+              key={g.id}
+              className="flex items-center justify-between gap-3 rounded border border-zinc-800 bg-zinc-900/40 px-3 py-2"
+            >
+              <div className="min-w-0">
+                <p className="text-zinc-100 truncate">
+                  <span className="font-medium">{g.chat_title ?? g.chat_id}</span>
+                  {' · '}
+                  {g.topic_id ? (
+                    <>topic {g.topic_name ? <span className="font-medium">{g.topic_name}</span> : <code>{g.topic_id}</code>}</>
+                  ) : (
+                    <span className="text-zinc-300">entire group</span>
+                  )}
+                </p>
+                <p className="text-zinc-500 text-xs">
+                  Chat ID: <code className="text-zinc-400">{g.chat_id}</code>
+                  {g.topic_id && (
+                    <>
+                      {' '}· Topic ID: <code className="text-zinc-400">{g.topic_id}</code>
+                    </>
+                  )}
+                </p>
+              </div>
+              <button
+                onClick={() => unlink(g.id)}
+                disabled={unlinking === g.id}
+                className="shrink-0 px-3 py-1.5 border border-red-900/60 bg-red-950/20 hover:bg-red-950/40 text-red-200 rounded text-xs font-medium disabled:opacity-50"
+              >
+                {unlinking === g.id ? 'Unlinking…' : 'Unlink'}
+              </button>
+            </div>
+          ))}
           <p className="text-zinc-500 text-xs">
-            Chat ID: <code className="text-zinc-400">{group.chat_id}</code>
-            {group.topic_id && (
-              <>
-                {' '}· Topic ID: <code className="text-zinc-400">{group.topic_id}</code>
-              </>
-            )}
-          </p>
-          <p className="text-zinc-400 text-xs">
-            {group.topic_id
-              ? 'The relay only reacts to messages in this exact topic — other topics and groups are ignored.'
-              : 'The relay reacts to every message in this group.'}{' '}
+            Each link is its own conversation with its own session — topic links only react
+            inside that exact topic; whole-group links react to every message in the group.
             Your private chat keeps working as usual.
           </p>
         </div>
       ) : (
         <p className="text-zinc-400">
-          Optionally link one group topic — the relay will answer there in addition
-          to your private chat, and only in that exact topic.
+          Optionally link group topics — the relay answers there in addition to your
+          private chat, each with its own separate conversation.
         </p>
       )}
 
@@ -454,24 +470,13 @@ function GroupTopicCard({
                 : 'Link the whole group — the bot reacts to every message in it.'}
             </p>
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={startCapture}
-              disabled={busy}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm font-medium"
-            >
-              {group ? 'Re-link (listen again)' : 'Start listening'}
-            </button>
-            {group && (
-              <button
-                onClick={unlink}
-                disabled={busy}
-                className="px-4 py-2 border border-red-900/60 bg-red-950/20 hover:bg-red-950/40 text-red-200 rounded text-sm font-medium disabled:opacity-50"
-              >
-                Unlink
-              </button>
-            )}
-          </div>
+          <button
+            onClick={startCapture}
+            disabled={busy}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm font-medium"
+          >
+            {groups.length > 0 ? 'Add another group topic' : 'Add a group topic'}
+          </button>
         </div>
       )}
 

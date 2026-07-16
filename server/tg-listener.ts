@@ -40,7 +40,7 @@ const TG_OFFSET_KEY = 'telegram_update_offset';
 // engines clears every session (ids never cross engines).
 const CLAUDE_SESSION_KEY = 'claude_session_id';
 
-function groupSessionKey(chatId: string, topicThreadId: number | null): string {
+function groupSessionKey(chatId: string, topicThreadId: number | string | null): string {
   return `${CLAUDE_SESSION_KEY}:group:${chatId}:${topicThreadId ?? 'general'}`;
 }
 
@@ -86,40 +86,102 @@ function isCapturing(): boolean {
   return getSetting(CAPTURE_KEY) === '1';
 }
 
-// ── Group-topic link ────────────────────────────────────────────────
+// ── Group-topic links ───────────────────────────────────────────────
 //
 // Besides the private chat linked during onboarding, the relay can be bound to
-// one group (optionally a specific forum topic inside it). Linking works like
-// onboarding: enable capture mode from the dashboard, send any message in the
+// any number of groups/forum topics, added one at a time. Linking works like
+// onboarding: enable capture mode from the dashboard, send a message in the
 // target group/topic, and the relay records the chat id + topic thread id.
+// Each link is its own conversation (sessions are keyed by chat + topic).
 
 export type GroupLink = {
+  id: number;
   chat_id: string;
-  topic_id: string | null; // null = plain group / the General topic
+  topic_id: string | null; // null = the whole group
   chat_title: string | null;
   topic_name: string | null;
 };
 
-export function getGroupLink(): GroupLink | null {
+export function listGroupLinks(): GroupLink[] {
+  return db
+    .prepare('SELECT id, chat_id, topic_id, chat_title, topic_name FROM group_links ORDER BY id')
+    .all() as GroupLink[];
+}
+
+/** Record a captured link; re-capturing an existing chat+topic just refreshes
+ *  its display names instead of duplicating the row. */
+function upsertGroupLink(link: Omit<GroupLink, 'id'>): void {
+  const existing = db
+    .prepare('SELECT id FROM group_links WHERE chat_id = ? AND topic_id IS ?')
+    .get(link.chat_id, link.topic_id) as { id: number } | undefined;
+  if (existing) {
+    db.prepare('UPDATE group_links SET chat_title = ?, topic_name = ? WHERE id = ?').run(
+      link.chat_title,
+      link.topic_name,
+      existing.id
+    );
+  } else {
+    db.prepare(
+      `INSERT INTO group_links (chat_id, topic_id, chat_title, topic_name, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(link.chat_id, link.topic_id, link.chat_title, link.topic_name, Date.now());
+  }
+}
+
+/** Remove one link, plus the conversations (and in-flight runs) that no
+ *  remaining link for that chat still covers. */
+export function unlinkGroup(id: number): boolean {
+  const row = db.prepare('SELECT chat_id FROM group_links WHERE id = ?').get(id) as
+    | { chat_id: string }
+    | undefined;
+  if (!row) return false;
+  db.prepare('DELETE FROM group_links WHERE id = ?').run(id);
+  dropUncoveredGroupSessions(row.chat_id);
+  return true;
+}
+
+export function unlinkAllGroups(): void {
+  db.run('DELETE FROM group_links');
+  deleteSetting(GROUP_CAPTURE_KEY);
+  for (const key of Array.from(activeRuns.keys())) {
+    if (key.startsWith(`${CLAUDE_SESSION_KEY}:group:`)) stopRun(key);
+  }
+  db.prepare('DELETE FROM settings WHERE key LIKE ?').run(`${CLAUDE_SESSION_KEY}:group:%`);
+}
+
+function dropUncoveredGroupSessions(chatId: string): void {
+  const remaining = listGroupLinks().filter((l) => l.chat_id === chatId);
+  // A whole-group link still covers every topic in the chat.
+  if (remaining.some((l) => l.topic_id === null)) return;
+  const covered = new Set(remaining.map((l) => groupSessionKey(chatId, l.topic_id)));
+  const prefix = `${CLAUDE_SESSION_KEY}:group:${chatId}:`;
+  const rows = db
+    .prepare('SELECT key FROM settings WHERE key LIKE ?')
+    .all(`${prefix}%`) as Array<{ key: string }>;
+  for (const r of rows) {
+    if (!covered.has(r.key)) deleteSetting(r.key);
+  }
+  for (const key of Array.from(activeRuns.keys())) {
+    if (key.startsWith(prefix) && !covered.has(key)) stopRun(key);
+  }
+}
+
+// One-time migration: the single-link settings keys became the group_links
+// table. Runs once — the legacy keys are deleted after copying.
+(function migrateLegacyGroupLink() {
   const chatId = getSetting(GROUP_CHAT_KEY);
-  if (!chatId) return null;
-  return {
+  if (!chatId) return;
+  upsertGroupLink({
     chat_id: chatId,
     topic_id: getSetting(GROUP_TOPIC_KEY),
     chat_title: getSetting(GROUP_TITLE_KEY),
     topic_name: getSetting(GROUP_TOPIC_NAME_KEY),
-  };
-}
-
-export function unlinkGroup(): void {
+  });
   deleteSetting(GROUP_CHAT_KEY);
   deleteSetting(GROUP_TOPIC_KEY);
   deleteSetting(GROUP_TITLE_KEY);
   deleteSetting(GROUP_TOPIC_NAME_KEY);
-  deleteSetting(GROUP_CAPTURE_KEY);
-  // Orphaned group conversations are useless once unlinked.
-  db.prepare('DELETE FROM settings WHERE key LIKE ?').run(`${CLAUDE_SESSION_KEY}:group:%`);
-}
+})();
 
 /** What the user chose to link: a specific forum topic, or the whole group. */
 export type GroupCaptureMode = 'topic' | 'group';
@@ -463,16 +525,14 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
       await sendGroupCaptureHint(incomingChatId);
       return;
     }
-    setSetting(GROUP_CHAT_KEY, incomingChatId);
-    if (topicThreadId != null) setSetting(GROUP_TOPIC_KEY, String(topicThreadId));
-    else deleteSetting(GROUP_TOPIC_KEY);
-    if (msg.chat.title) setSetting(GROUP_TITLE_KEY, msg.chat.title);
-    else deleteSetting(GROUP_TITLE_KEY);
     // A topic message quotes the topic-created service message, which carries
     // the topic's name — grab it for the dashboard when available.
-    const topicName = msg.reply_to_message?.forum_topic_created?.name;
-    if (topicName) setSetting(GROUP_TOPIC_NAME_KEY, topicName);
-    else deleteSetting(GROUP_TOPIC_NAME_KEY);
+    upsertGroupLink({
+      chat_id: incomingChatId,
+      topic_id: topicThreadId != null ? String(topicThreadId) : null,
+      chat_title: msg.chat.title ?? null,
+      topic_name: msg.reply_to_message?.forum_topic_created?.name ?? null,
+    });
     deleteSetting(GROUP_CAPTURE_KEY);
     const label = ENGINE_LABELS[getEngineId()];
     await sendTelegram(
@@ -517,17 +577,24 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
     return;
   }
 
-  // Authorization: the onboarded private chat, or the linked group. A link
+  // Authorization: the onboarded private chat, or any linked group. A link
   // with a topic id only matches that exact topic; a whole-group link (no
-  // topic id) matches anywhere in the group.
-  const group = getGroupLink();
+  // topic id) matches anywhere in the group. When both exist for a chat the
+  // topic link wins (more specific), though either way the session is keyed
+  // by chat + topic.
+  const links = listGroupLinks();
   const fromPrivate = Boolean(expectedChatId && incomingChatId === expectedChatId);
-  const fromGroupTopic = Boolean(
-    group &&
-      incomingChatId === group.chat_id &&
-      (group.topic_id === null ||
-        (topicThreadId != null && String(topicThreadId) === group.topic_id))
-  );
+  const matchedLink =
+    links.find(
+      (l) =>
+        l.chat_id === incomingChatId &&
+        l.topic_id !== null &&
+        topicThreadId != null &&
+        String(topicThreadId) === l.topic_id
+    ) ??
+    links.find((l) => l.chat_id === incomingChatId && l.topic_id === null) ??
+    null;
+  const fromGroupTopic = Boolean(matchedLink);
   if (!fromPrivate && !fromGroupTopic) {
     console.log(`[tg-listener] ignored message from unauthorized chat ${incomingChatId}`);
     return;
@@ -642,13 +709,13 @@ async function processUpdate(upd: TelegramUpdate, expectedChatId: string | null)
 
   // Let the agent know which room it's talking in (group messages only — the
   // private chat is the default and needs no tag).
-  if (fromGroupTopic && group) {
-    const title = msg.chat.title ?? group.chat_title ?? incomingChatId;
+  if (matchedLink) {
+    const title = msg.chat.title ?? matchedLink.chat_title ?? incomingChatId;
     const topicPart =
       topicThreadId != null
         ? `, topic ${
-            group.topic_name && String(topicThreadId) === group.topic_id
-              ? `"${group.topic_name}"`
+            matchedLink.topic_name && String(topicThreadId) === matchedLink.topic_id
+              ? `"${matchedLink.topic_name}"`
               : topicThreadId
           }`
         : '';

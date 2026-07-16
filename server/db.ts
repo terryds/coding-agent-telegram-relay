@@ -49,6 +49,19 @@ db.run(`
 
 db.run('CREATE INDEX IF NOT EXISTS idx_step_log_created_at ON step_log(created_at DESC)');
 
+// Linked group chats/topics the relay answers in (besides the private chat).
+// topic_id NULL = the whole group; otherwise one forum topic.
+db.run(`
+  CREATE TABLE IF NOT EXISTS group_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    topic_id TEXT,
+    chat_title TEXT,
+    topic_name TEXT,
+    created_at INTEGER NOT NULL
+  )
+`);
+
 export function getSetting(key: string): string | null {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
     | { value: string }
