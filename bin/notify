@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# notify [--chat <chat_id>] [--thread <thread_id>] [--html] [--dry-run] [message...]
+#
+# Push a message to the linked Telegram chat, independent of the relay
+# process. Reads the bot token and default chat id from the relay's settings
+# DB (data/app.db), same as safe-update-relay — so it works even while the
+# relay is down or mid-restart.
+#
+# Message comes from the args, or from stdin when no message args are given
+# (e.g. `claude -p "..." | bin/notify`). Long messages are sent in chunks.
+#
+# Options:
+#   --chat <id>     target chat id (default: the linked telegram_chat_id)
+#   --thread <id>   message_thread_id, for linked group topics
+#   --html          send with parse_mode=HTML (default: plain text — safest
+#                   for arbitrary/piped output, which HTML mode would reject)
+#   --dry-run       print the request bodies instead of sending
+#
+# Env: RELAY_DB overrides the settings DB path.
+
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DB="${RELAY_DB:-$REPO_DIR/data/app.db}"
+
+CHAT_ID=""
+THREAD_ID=""
+HTML=0
+DRY_RUN=0
+MSG_ARGS=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --chat)    CHAT_ID="${2:?--chat needs a value}"; shift 2 ;;
+    --thread)  THREAD_ID="${2:?--thread needs a value}"; shift 2 ;;
+    --html)    HTML=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)         MSG_ARGS+=("$1"); shift ;;
+  esac
+done
+
+if [ ${#MSG_ARGS[@]} -gt 0 ]; then
+  MSG="${MSG_ARGS[*]}"
+else
+  MSG="$(cat)"
+fi
+# Empty message → silent no-op, so `agent-check | notify` cron jobs that
+# output nothing on quiet runs don't error or trigger cron mail.
+if [ -z "${MSG//[[:space:]]/}" ]; then
+  exit 0
+fi
+
+TOKEN="$(sqlite3 "$DB" "SELECT value FROM settings WHERE key='telegram_bot_token'" 2>/dev/null || true)"
+if [ -z "$CHAT_ID" ]; then
+  CHAT_ID="$(sqlite3 "$DB" "SELECT value FROM settings WHERE key='telegram_chat_id'" 2>/dev/null || true)"
+fi
+if [ -z "$TOKEN" ]; then
+  echo "notify: no telegram_bot_token in $DB" >&2
+  exit 1
+fi
+if [ -z "$CHAT_ID" ]; then
+  echo "notify: no chat id — link a chat in the dashboard or pass --chat" >&2
+  exit 1
+fi
+
+# Telegram caps messages at 4096 UTF-16 code units; chunk conservatively
+# (bash slices by codepoint, and emoji count double in UTF-16).
+MAX=3500
+
+while [ -n "$MSG" ]; do
+  CHUNK="${MSG:0:$MAX}"
+  MSG="${MSG:$MAX}"
+  BODY="$(jq -n --arg cid "$CHAT_ID" --arg t "$CHUNK" --arg tid "$THREAD_ID" \
+    --argjson html "$HTML" \
+    '{chat_id: $cid, text: $t, disable_web_page_preview: true}
+     + (if $tid != "" then {message_thread_id: ($tid | tonumber)} else {} end)
+     + (if $html == 1 then {parse_mode: "HTML"} else {} end)')"
+
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "$BODY"
+    continue
+  fi
+
+  RESP="$(curl -s --max-time 15 -X POST \
+    "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+    -H 'Content-Type: application/json' -d "$BODY")"
+  if ! echo "$RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+    echo "notify: send failed: $RESP" >&2
+    exit 1
+  fi
+done

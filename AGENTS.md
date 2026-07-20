@@ -22,6 +22,70 @@ raw URL on its own:
 https://example.com/#project/foo
 ```
 
+## Messaging the user proactively (reminders, "tell me later")
+
+The relay is purely reactive: each incoming Telegram message spawns a one-shot
+headless run (`claude -p` / `codex exec`), and your process dies the moment
+your turn ends. Harness timers (`ScheduleWakeup`, cron tools, background
+tasks) will **not** fire after that — never rely on them here.
+
+To push a message to the user's Telegram at any time, use:
+
+```bash
+bin/notify "your message"        # or pipe:  some-command | bin/notify
+```
+
+It reads the bot token and linked chat id from the relay's settings DB
+(`data/app.db`), so it works even while the relay is down. Options:
+`--chat <id>` / `--thread <id>` to target a linked group topic, `--html` for
+Telegram-HTML (default is plain text — safest for piped output), `--dry-run`
+to print the request instead of sending.
+
+To say something **later**, schedule a detached job that outlives your turn
+(same trick safe-update-relay uses). Use an absolute path — resolve it while
+your turn is still alive, e.g. `N="$PWD/bin/notify"`:
+
+```bash
+# one-off in 2 minutes — survives your process exiting and pm2 restarts,
+# but NOT a host reboot; use cron for durable/recurring schedules:
+setsid nohup bash -c "sleep 120 && \"$N\" '👋 2 minutes are up'" >/dev/null 2>&1 &
+```
+
+For "check X later and tell me" — a real agent turn, not canned text — have
+the scheduled job run a fresh headless turn and pipe the result:
+
+```bash
+setsid nohup bash -c "sleep 7200 && cd $PWD && claude -p 'Check the deploy status of foo; summarize in 3 lines.' --permission-mode bypassPermissions 2>&1 | \"$N\"" >/dev/null 2>&1 &
+```
+
+Prefer a fresh session with a self-contained prompt over `--resume`: resuming
+the relay's live session from a background job can race with a run the relay
+starts at the same moment.
+
+### Recurring checks (cron)
+
+For "check X every N hours", install a crontab entry (survives reboots; the
+relay doesn't need to be running). Rules that matter:
+
+- **cron's PATH is nearly empty** (`/usr/bin:/bin`) — resolve absolute paths
+  while your turn is alive (`command -v claude`, `$PWD/bin/notify`) and use
+  those in the entry. A bare `claude` silently does nothing under cron.
+- **Every firing is a fresh session with no memory** — write the prompt to be
+  self-contained ("alert only if >80%", not "check it again"). If a check
+  needs to compare against last time, have the prompt read/write a state file
+  (e.g. under `/tmp` or the repo's `data/`).
+- **Every firing is a billed agent turn** — keep scheduled prompts small, and
+  prefer "message only when something's wrong" prompts so quiet runs stay
+  cheap and don't spam the chat (`bin/notify` skips empty input).
+
+```bash
+CLAUDE="$(command -v claude)"; N="$PWD/bin/notify"
+( crontab -l 2>/dev/null; echo "0 */6 * * * cd $PWD && $CLAUDE -p 'Check disk usage on this host; reply ONLY if a filesystem is over 80% full, else output nothing.' --permission-mode bypassPermissions 2>&1 | $N" ) | crontab -
+```
+
+List entries with `crontab -l`; remove one by filtering it out and re-piping
+to `crontab -`. When the user asks to stop a recurring check, do that cleanup.
+
 ## Setup
 
 Install the system dependencies (bun, Node, pm2, git, jq, sqlite3):
